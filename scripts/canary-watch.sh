@@ -110,6 +110,13 @@ iteration=0
 breaches=0
 MAX_BREACHES=2   # require 2 consecutive breaches to avoid flapping
 
+# Pre-initialise metrics so the final output block never touches unset
+# vars (set -u) when every iteration skipped due to MIN_REQUESTS gating.
+TOTAL_REQS=0
+ERROR_REQS=0
+ERROR_RATE=0
+P95_LATENCY=0
+
 while [ "$(date +%s)" -lt "$end_ts" ]; do
   iteration=$((iteration + 1))
   echo ""
