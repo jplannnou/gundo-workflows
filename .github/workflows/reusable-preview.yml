@@ -1,0 +1,121 @@
+name: Reusable Cloud Run Preview
+
+# ------------------------------------------------------------------------------
+# On a pull_request event, deploy a Cloud Run preview revision with
+# --no-traffic + tag=pr-<number>. Access it via tagged URL:
+#   https://pr-123---<service>-<hash>-<region>.a.run.app
+#
+# Comments the preview URL on the PR.
+#
+# When the PR is closed, the accompanying cleanup workflow removes the tag
+# (see templates/preview-cleanup.yml for a copy-paste example).
+# ------------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      gcp-project:
+        type: string
+        required: true
+      gcp-region:
+        type: string
+        default: 'us-central1'
+      service:
+        type: string
+        required: true
+      image:
+        description: 'Full image URI (from reusable-build-sign)'
+        type: string
+        required: true
+      workload-identity-provider:
+        type: string
+        required: true
+      service-account:
+        type: string
+        required: true
+      runtime-service-account:
+        type: string
+        required: true
+      memory:
+        type: string
+        default: '512Mi'
+      cpu:
+        type: string
+        default: '1'
+      env-vars:
+        type: string
+        default: ''
+      secrets-mapping:
+        type: string
+        default: ''
+    outputs:
+      preview-url:
+        value: ${{ jobs.preview.outputs.url }}
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  preview:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.service-account }}
+          token_format: access_token
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy preview revision
+        id: deploy
+        run: |
+          PR_TAG="pr-${{ github.event.pull_request.number }}"
+          FLAGS="--image=${{ inputs.image }}"
+          FLAGS="$FLAGS --region=${{ inputs.gcp-region }}"
+          FLAGS="$FLAGS --project=${{ inputs.gcp-project }}"
+          FLAGS="$FLAGS --service-account=${{ inputs.runtime-service-account }}"
+          FLAGS="$FLAGS --memory=${{ inputs.memory }} --cpu=${{ inputs.cpu }}"
+          FLAGS="$FLAGS --no-traffic --tag=$PR_TAG"
+          if [ -n "${{ inputs.env-vars }}" ]; then
+            FLAGS="$FLAGS --set-env-vars=${{ inputs.env-vars }}"
+          fi
+          if [ -n "${{ inputs.secrets-mapping }}" ]; then
+            FLAGS="$FLAGS --set-secrets=${{ inputs.secrets-mapping }}"
+          fi
+          gcloud run deploy ${{ inputs.service }} $FLAGS
+
+          URL=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --format="value(status.traffic[?tag='$PR_TAG'].url)" | head -1)
+
+          if [ -z "$URL" ]; then
+            URL=$(gcloud run services describe ${{ inputs.service }} \
+              --region=${{ inputs.gcp-region }} \
+              --project=${{ inputs.gcp-project }} \
+              --format="value(status.url)")
+            URL=$(echo "$URL" | sed "s|https://|https://$PR_TAG---|")
+          fi
+
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Comment preview URL on PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: cloudrun-preview-${{ inputs.service }}
+          message: |
+            ### Cloud Run preview deployed
+
+            | Service | URL |
+            |---|---|
+            | `${{ inputs.service }}` | [${{ steps.deploy.outputs.url }}](${{ steps.deploy.outputs.url }}) |
+
+            Revision is isolated (0% production traffic). Tag `pr-${{ github.event.pull_request.number }}` will be removed when this PR closes.

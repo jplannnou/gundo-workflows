@@ -1,0 +1,84 @@
+# Example: Gundo Engine consumer ci.yml
+# Copy this into ~/projects/Gundo_Engine/.github/workflows/ci.yml when ready
+# to migrate Engine to the reusable workflows.
+
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  ci:
+    uses: jplannnou/gundo-workflows/.github/workflows/reusable-ci.yml@v1
+    with:
+      workspaces: 'backend,frontend'
+    secrets:
+      NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+
+  build:
+    needs: ci
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    uses: jplannnou/gundo-workflows/.github/workflows/reusable-build-sign.yml@v1
+    with:
+      gcp-project: gundo-content-engine
+      gcp-region: us-central1
+      service: gundo-engine
+      dockerfile: backend/Dockerfile
+      build-context: backend
+      build-args: |
+        NODE_AUTH_TOKEN=${{ secrets.NODE_AUTH_TOKEN }}
+      workload-identity-provider: projects/744494884826/locations/global/workloadIdentityPools/github/providers/github-provider
+      service-account: ci-deploy@gundo-content-engine.iam.gserviceaccount.com
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    uses: jplannnou/gundo-workflows/.github/workflows/reusable-deploy-cloudrun.yml@v1
+    with:
+      gcp-project: gundo-content-engine
+      service: gundo-engine
+      image: ${{ needs.build.outputs.image }}
+      workload-identity-provider: projects/744494884826/locations/global/workloadIdentityPools/github/providers/github-provider
+      service-account: ci-deploy@gundo-content-engine.iam.gserviceaccount.com
+      runtime-service-account: gundo-engine-runtime@gundo-content-engine.iam.gserviceaccount.com
+      memory: '4Gi'
+      cpu: '2'
+      timeout: '900'
+      concurrency: 40
+      min-instances: 1
+      max-instances: 10
+      canary-percent: 10
+      canary-duration-seconds: 300
+      max-error-rate: 0.02
+      max-p95-latency-ms: 2000
+      env-vars: 'NODE_ENV=production,LOG_LEVEL=info'
+      secrets-mapping: 'JWT_SECRET=JWT_SECRET:latest,GEMINI_KEY=GOOGLE_GENERATIVE_AI_API_KEY:latest'
+    secrets:
+      FEEDBACK_HUB_API_KEY: ${{ secrets.FEEDBACK_HUB_API_KEY }}
+
+  preview:
+    needs: build
+    if: github.event_name == 'pull_request'
+    uses: jplannnou/gundo-workflows/.github/workflows/reusable-preview.yml@v1
+    with:
+      gcp-project: gundo-content-engine
+      service: gundo-engine
+      image: ${{ needs.build.outputs.image }}
+      workload-identity-provider: projects/744494884826/locations/global/workloadIdentityPools/github/providers/github-provider
+      service-account: ci-deploy@gundo-content-engine.iam.gserviceaccount.com
+      runtime-service-account: gundo-engine-runtime@gundo-content-engine.iam.gserviceaccount.com
+      memory: '4Gi'
+      cpu: '2'
+      env-vars: 'NODE_ENV=preview'
+
+  frontend:
+    needs: ci
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    # Vercel deploy keeps its current path for now (ADR 001 Fase 3 will consolidate)
+    uses: ./.github/workflows/vercel-deploy.yml
+    secrets: inherit

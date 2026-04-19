@@ -1,0 +1,173 @@
+name: Reusable Build + Sign
+
+# ------------------------------------------------------------------------------
+# Build a Docker image, push to Artifact Registry, sign with Cosign (keyless
+# OIDC), and generate a SPDX SBOM with syft.
+#
+# Outputs:
+#   image:         Full image URI with digest (region-docker.pkg.dev/.../svc@sha256:...)
+#   image-tag:     Tag used (github.sha)
+#   sbom-artifact: Name of uploaded SBOM artifact
+# ------------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      gcp-project:
+        description: 'GCP project ID (e.g. gundo-content-engine)'
+        type: string
+        required: true
+      gcp-region:
+        description: 'GCP region for Artifact Registry'
+        type: string
+        default: 'us-central1'
+      service:
+        description: 'Cloud Run service name / image name'
+        type: string
+        required: true
+      artifact-repo:
+        description: 'Artifact Registry repository name'
+        type: string
+        default: 'gundo'
+      dockerfile:
+        description: 'Path to Dockerfile'
+        type: string
+        default: 'Dockerfile'
+      build-context:
+        description: 'Docker build context directory'
+        type: string
+        default: '.'
+      build-args:
+        description: 'Newline-separated KEY=VALUE build args'
+        type: string
+        default: ''
+      workload-identity-provider:
+        description: 'Full resource name of WIF provider'
+        type: string
+        required: true
+      service-account:
+        description: 'Service account email used by the build'
+        type: string
+        required: true
+    outputs:
+      image:
+        description: 'Full image URI including digest'
+        value: ${{ jobs.build.outputs.image }}
+      image-tag:
+        description: 'Tag used for this build'
+        value: ${{ jobs.build.outputs.image-tag }}
+      digest:
+        description: 'Image digest (sha256:...)'
+        value: ${{ jobs.build.outputs.digest }}
+
+permissions:
+  contents: read
+  id-token: write   # Required for WIF and Cosign keyless signing
+  packages: write
+
+jobs:
+  build:
+    name: Build + push + sign
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      image-tag: ${{ steps.meta.outputs.tag }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.service-account }}
+          token_format: access_token
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: |
+          gcloud auth configure-docker ${{ inputs.gcp-region }}-docker.pkg.dev --quiet
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          IMAGE_BASE="${{ inputs.gcp-region }}-docker.pkg.dev/${{ inputs.gcp-project }}/${{ inputs.artifact-repo }}/${{ inputs.service }}"
+          TAG="${{ github.sha }}"
+          echo "image=${IMAGE_BASE}:${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image-base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Pull cache image (best-effort)
+        run: |
+          docker pull ${{ steps.meta.outputs.image-base }}:latest || echo "No cache image yet"
+
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.build-context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image-base }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image-base }}:latest
+          build-args: ${{ inputs.build-args }}
+          cache-from: type=registry,ref=${{ steps.meta.outputs.image-base }}:latest
+          cache-to: type=inline
+          provenance: true
+          sbom: false   # We generate our own below with syft (more control)
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Sign image (keyless OIDC)
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          IMAGE_REF="${{ steps.meta.outputs.image-base }}@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "$IMAGE_REF"
+          echo "Signed: $IMAGE_REF"
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM (SPDX JSON)
+        run: |
+          IMAGE_REF="${{ steps.meta.outputs.image-base }}@${{ steps.push.outputs.digest }}"
+          syft "$IMAGE_REF" -o spdx-json > sbom-${{ github.sha }}.spdx.json
+          echo "SBOM generated for $IMAGE_REF"
+
+      - name: Attach SBOM attestation (Cosign)
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          IMAGE_REF="${{ steps.meta.outputs.image-base }}@${{ steps.push.outputs.digest }}"
+          cosign attest --yes \
+            --predicate sbom-${{ github.sha }}.spdx.json \
+            --type spdx \
+            "$IMAGE_REF"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ inputs.service }}-${{ github.sha }}
+          path: sbom-${{ github.sha }}.spdx.json
+          retention-days: 90
+
+      - name: Scan image with Trivy (post-build gate)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.image-base }}@${{ steps.push.outputs.digest }}
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'

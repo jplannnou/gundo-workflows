@@ -1,0 +1,52 @@
+name: 'Gundo Deploy Reporter'
+description: 'Reports deployment lifecycle events to the Feedback Hub DevOps endpoint'
+author: 'Gundo'
+
+inputs:
+  feedback-hub-url:
+    description: 'Base URL of Feedback Hub API'
+    required: true
+  feedback-hub-api-key:
+    description: 'API key with devops scope'
+    required: true
+  project:
+    description: 'Project identifier (e.g. gundo-engine)'
+    required: true
+  commit:
+    description: 'Commit SHA being deployed'
+    required: true
+  status:
+    description: 'One of: pending, building, canary, promoted, rolled_back, failed'
+    required: true
+  revision:
+    description: 'Cloud Run revision name (optional)'
+    required: false
+  traffic-percent:
+    description: 'Current traffic percentage on this revision'
+    required: false
+  metrics-json:
+    description: 'JSON-encoded metrics block'
+    required: false
+  rollback-reason:
+    description: 'Why we rolled back, if applicable'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Report deployment
+      shell: bash
+      env:
+        FEEDBACK_HUB_URL: ${{ inputs.feedback-hub-url }}
+        FEEDBACK_HUB_API_KEY: ${{ inputs.feedback-hub-api-key }}
+        GITHUB_EVENT_HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+      run: |
+        SCRIPT_DIR="${{ github.action_path }}/../../scripts"
+        bash "$SCRIPT_DIR/report-deployment.sh" \
+          --project="${{ inputs.project }}" \
+          --commit="${{ inputs.commit }}" \
+          --status="${{ inputs.status }}" \
+          ${{ inputs.revision && format('--revision="{0}"', inputs.revision) || '' }} \
+          ${{ inputs.traffic-percent && format('--traffic-percent={0}', inputs.traffic-percent) || '' }} \
+          ${{ inputs.metrics-json && format('--metrics-json=''{0}''', inputs.metrics-json) || '' }} \
+          ${{ inputs.rollback-reason && format('--rollback-reason="{0}"', inputs.rollback-reason) || '' }}

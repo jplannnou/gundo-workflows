@@ -1,0 +1,178 @@
+name: Reusable Firebase Deploy (WIF)
+
+# ------------------------------------------------------------------------------
+# Deploy a static frontend to Firebase Hosting using Workload Identity
+# Federation instead of long-lived JSON service account keys.
+#
+# Prerequisites (one-time setup per GCP project):
+#   1. WIF pool + provider already exist (same as Cloud Run deploys)
+#   2. A deploy SA (e.g. firebase-deploy@PROJECT.iam.gserviceaccount.com) with
+#      roles/firebasehosting.admin + roles/cloudresourcemanager.viewer
+#   3. WIF provider bound to the SA via iam.workloadIdentityUser on the repo
+#
+# Also pushes a "preview" channel if called from a pull_request event.
+# ------------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      gcp-project:
+        type: string
+        required: true
+      firebase-project:
+        description: 'Firebase project ID (often same as GCP project)'
+        type: string
+        required: true
+      workload-identity-provider:
+        type: string
+        required: true
+      service-account:
+        description: 'Firebase deploy SA email'
+        type: string
+        required: true
+      build-dir:
+        description: 'Directory containing built static files (index.html)'
+        type: string
+        default: 'frontend/dist'
+      build-command:
+        description: 'Shell command that produces build-dir (runs in working-directory)'
+        type: string
+        default: 'pnpm install --frozen-lockfile && pnpm build'
+      working-directory:
+        type: string
+        default: 'frontend'
+      node-version:
+        type: string
+        default: '22'
+      pnpm-version:
+        type: string
+        default: '10.30.1'
+      target:
+        description: 'Firebase Hosting target (optional)'
+        type: string
+        default: ''
+      only:
+        description: 'firebase deploy --only flag value (hosting, functions, etc.)'
+        type: string
+        default: 'hosting'
+      channel:
+        description: 'Hosting channel (live for prod, auto-generated for PRs)'
+        type: string
+        default: 'live'
+      env-file-b64:
+        description: 'Base64-encoded .env.production content (optional)'
+        type: string
+        default: ''
+    secrets:
+      NODE_AUTH_TOKEN:
+        description: 'GitHub Packages token for @jplannnou/* packages'
+        required: false
+    outputs:
+      hosting-url:
+        description: 'URL of the deployed hosting channel'
+        value: ${{ jobs.deploy.outputs.url }}
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+          cache-dependency-path: '${{ inputs.working-directory }}/pnpm-lock.yaml'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@jplannnou'
+
+      - name: Write .env.production (if provided)
+        if: inputs.env-file-b64 != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: echo "${{ inputs.env-file-b64 }}" | base64 -d > .env.production
+
+      - name: Build
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: ${{ inputs.build-command }}
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.service-account }}
+          token_format: access_token
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools@latest
+
+      - name: Determine channel name
+        id: channel
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CHANNEL="pr-${{ github.event.pull_request.number }}"
+            EXPIRES="--expires 7d"
+          else
+            CHANNEL="${{ inputs.channel }}"
+            EXPIRES=""
+          fi
+          echo "name=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "expires=$EXPIRES" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to Firebase Hosting
+        id: deploy
+        env:
+          FIREBASE_TOKEN: ${{ steps.auth.outputs.access_token }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
+        run: |
+          if [ "${{ steps.channel.outputs.name }}" = "live" ]; then
+            firebase deploy \
+              --project="${{ inputs.firebase-project }}" \
+              --only="${{ inputs.only }}" \
+              --non-interactive \
+              --force
+            URL="https://${{ inputs.firebase-project }}.web.app"
+          else
+            OUTPUT=$(firebase hosting:channel:deploy "${{ steps.channel.outputs.name }}" \
+              --project="${{ inputs.firebase-project }}" \
+              --only="${{ inputs.only }}" \
+              ${{ steps.channel.outputs.expires }} \
+              --non-interactive \
+              --json)
+            URL=$(echo "$OUTPUT" | node -e "let d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.result['${{ inputs.firebase-project }}'].url||'')")
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Deployed to $URL"
+
+      - name: Comment preview URL on PR
+        if: github.event_name == 'pull_request' && steps.deploy.outputs.url != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: firebase-preview-${{ inputs.firebase-project }}
+          message: |
+            ### Firebase preview deployed
+
+            | Project | URL |
+            |---|---|
+            | `${{ inputs.firebase-project }}` | [${{ steps.deploy.outputs.url }}](${{ steps.deploy.outputs.url }}) |
+
+            Channel: `${{ steps.channel.outputs.name }}` — expires in 7 days.

@@ -1,0 +1,153 @@
+name: Reusable CI
+
+# ------------------------------------------------------------------------------
+# Lint + typecheck + build + tests + security scan for any Gundo project.
+# Supports multi-workspace pnpm monorepos (backend, frontend, or both).
+#
+# Usage:
+#   jobs:
+#     ci:
+#       uses: jplannnou/gundo-workflows/.github/workflows/reusable-ci.yml@v1
+#       with:
+#         workspaces: 'backend,frontend'
+#       secrets:
+#         NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+# ------------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version'
+        type: string
+        default: '22'
+      pnpm-version:
+        description: 'pnpm version (should match all Gundo projects)'
+        type: string
+        default: '10.30.1'
+      workspaces:
+        description: 'Comma-separated list of pnpm workspaces to build'
+        type: string
+        default: 'backend,frontend'
+      run-tests:
+        description: 'Run unit tests'
+        type: boolean
+        default: true
+      run-trivy:
+        description: 'Run Trivy dependency + filesystem scan'
+        type: boolean
+        default: true
+      trivy-severity:
+        description: 'Trivy severity threshold that fails the job'
+        type: string
+        default: 'HIGH,CRITICAL'
+      working-directory:
+        description: 'Root directory when repo is not a monorepo root'
+        type: string
+        default: '.'
+    secrets:
+      NODE_AUTH_TOKEN:
+        description: 'GitHub Packages read token for @jplannnou/* private packages'
+        required: false
+
+jobs:
+  workspace-matrix:
+    name: Build workspace
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: ${{ fromJSON(format('["{0}"]', replace(inputs.workspaces, ',', '","'))) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}/${{ matrix.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+          cache-dependency-path: '${{ inputs.working-directory }}/${{ matrix.workspace }}/pnpm-lock.yaml'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@jplannnou'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: |
+          if pnpm run | grep -q '^  typecheck'; then
+            pnpm typecheck
+          else
+            pnpm exec tsc --noEmit
+          fi
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        if: inputs.run-tests
+        run: |
+          if pnpm run | grep -q '^  test'; then
+            pnpm test -- --run --passWithNoTests || pnpm test -- --passWithNoTests
+          else
+            echo "No test script defined; skipping"
+          fi
+
+      - name: Upload build artifacts
+        if: matrix.workspace == 'backend' || matrix.workspace == 'frontend'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.workspace }}-${{ github.sha }}
+          path: |
+            ${{ inputs.working-directory }}/${{ matrix.workspace }}/dist
+            ${{ inputs.working-directory }}/${{ matrix.workspace }}/build
+          retention-days: 7
+          if-no-files-found: ignore
+
+  security-scan:
+    name: Security scan
+    runs-on: ubuntu-latest
+    if: inputs.run-trivy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: ${{ inputs.trivy-severity }}
+          exit-code: '1'
+          ignore-unfixed: true
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: trivy-${{ github.run_id }}
+
+      - name: Run Trivy secret scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scanners: 'secret'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'

@@ -1,0 +1,99 @@
+name: Reusable NPM Publish (semantic-release)
+
+# ------------------------------------------------------------------------------
+# Publish a package to GitHub Packages (npm.pkg.github.com) using
+# semantic-release on push to main. Conventional Commits drive the version
+# bump:
+#   feat:  -> minor
+#   fix:   -> patch
+#   feat!: -> major (BREAKING CHANGE)
+#
+# Used by @gundo/ui and @gundo/feedback-sdk. After a release, callers can
+# trigger a propagate job that opens PRs in consumer repos bumping the
+# dependency.
+# ------------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: '22'
+      pnpm-version:
+        type: string
+        default: '10.30.1'
+      working-directory:
+        type: string
+        default: '.'
+      build-command:
+        type: string
+        default: 'pnpm install --frozen-lockfile && pnpm build'
+    secrets:
+      GH_PACKAGES_TOKEN:
+        description: 'Token with write:packages scope'
+        required: true
+    outputs:
+      new-version:
+        value: ${{ jobs.release.outputs.new-version }}
+      released:
+        value: ${{ jobs.release.outputs.released }}
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  packages: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      new-version: ${{ steps.sr.outputs.new_release_version }}
+      released: ${{ steps.sr.outputs.new_release_published }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@jplannnou'
+
+      - name: Build
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+        run: ${{ inputs.build-command }}
+
+      - name: Install semantic-release plugins
+        run: |
+          npm install --no-save \
+            semantic-release@23 \
+            @semantic-release/changelog@6 \
+            @semantic-release/git@10 \
+            @semantic-release/github@10 \
+            @semantic-release/npm@12 \
+            @semantic-release/commit-analyzer@13 \
+            @semantic-release/release-notes-generator@14
+
+      - name: Run semantic-release
+        id: sr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+          NPM_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+        run: npx semantic-release

@@ -1,0 +1,295 @@
+name: Reusable Cloud Run Deploy (canary + auto-rollback)
+
+# ------------------------------------------------------------------------------
+# Deploy a signed, SBOM-attested Docker image to Cloud Run with canary
+# strategy:
+#   1. Deploy new revision with --no-traffic and tag=canary-<sha>
+#   2. Shift 10% traffic to canary
+#   3. Watch SLO (error rate, p95 latency) for `canary-duration` seconds
+#   4. If SLO holds: promote to 100% + tag stable
+#   5. If SLO breaks: rollback to previous stable revision
+#
+# Reports deployment lifecycle to Feedback Hub (/api/devops/deployments).
+# ------------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      gcp-project:
+        type: string
+        required: true
+      gcp-region:
+        type: string
+        default: 'us-central1'
+      service:
+        description: 'Cloud Run service name'
+        type: string
+        required: true
+      image:
+        description: 'Full image URI (from reusable-build-sign outputs)'
+        type: string
+        required: true
+      workload-identity-provider:
+        type: string
+        required: true
+      service-account:
+        description: 'SA used by the deploy job (NOT the Cloud Run runtime SA)'
+        type: string
+        required: true
+      runtime-service-account:
+        description: 'SA that the Cloud Run service runs as'
+        type: string
+        required: true
+      secrets-mapping:
+        description: 'Comma-separated MOUNT=SECRET:VERSION pairs for --set-secrets'
+        type: string
+        default: ''
+      env-vars:
+        description: 'Comma-separated KEY=VALUE pairs for --set-env-vars'
+        type: string
+        default: ''
+      memory:
+        type: string
+        default: '1Gi'
+      cpu:
+        type: string
+        default: '1'
+      concurrency:
+        type: number
+        default: 80
+      timeout:
+        type: string
+        default: '300'
+      min-instances:
+        type: number
+        default: 0
+      max-instances:
+        type: number
+        default: 10
+      canary-percent:
+        description: 'Traffic percentage sent to canary during watch'
+        type: number
+        default: 10
+      canary-duration-seconds:
+        description: 'How long to watch the canary before promoting'
+        type: number
+        default: 300
+      max-error-rate:
+        description: 'Error rate (0-1) that triggers rollback'
+        type: number
+        default: 0.01
+      max-p95-latency-ms:
+        description: 'p95 latency in ms that triggers rollback'
+        type: number
+        default: 1500
+      skip-canary:
+        description: 'If true, deploy directly to 100% (emergency use only)'
+        type: boolean
+        default: false
+      feedback-hub-url:
+        description: 'Base URL of Feedback Hub API'
+        type: string
+        default: 'https://gundo-content-engine-xlpp333cua-uc.a.run.app'
+    secrets:
+      FEEDBACK_HUB_API_KEY:
+        description: 'API key for Feedback Hub /api/devops endpoints'
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  deploy:
+    name: Canary deploy
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.outcome.outputs.status }}
+      revision: ${{ steps.deploy-new.outputs.revision }}
+    steps:
+      - name: Checkout gundo-workflows scripts
+        uses: actions/checkout@v5
+        with:
+          repository: jplannnou/gundo-workflows
+          ref: v1
+          path: .gundo-workflows
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.service-account }}
+          token_format: access_token
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Verify image signature (Cosign)
+        run: |
+          curl -L https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 \
+            -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+          COSIGN_EXPERIMENTAL=1 cosign verify \
+            --certificate-identity-regexp="https://github.com/${{ github.repository_owner }}/.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            "${{ inputs.image }}"
+
+      - name: Report deploy started
+        env:
+          FEEDBACK_HUB_URL: ${{ inputs.feedback-hub-url }}
+          FEEDBACK_HUB_API_KEY: ${{ secrets.FEEDBACK_HUB_API_KEY }}
+        run: |
+          bash .gundo-workflows/scripts/report-deployment.sh \
+            --project="${{ inputs.service }}" \
+            --commit="${{ github.sha }}" \
+            --status="building" \
+            --author="${{ github.actor }}"
+
+      - name: Build deploy flags
+        id: flags
+        run: |
+          FLAGS="--image=${{ inputs.image }}"
+          FLAGS="$FLAGS --region=${{ inputs.gcp-region }}"
+          FLAGS="$FLAGS --project=${{ inputs.gcp-project }}"
+          FLAGS="$FLAGS --service-account=${{ inputs.runtime-service-account }}"
+          FLAGS="$FLAGS --memory=${{ inputs.memory }} --cpu=${{ inputs.cpu }}"
+          FLAGS="$FLAGS --concurrency=${{ inputs.concurrency }} --timeout=${{ inputs.timeout }}"
+          FLAGS="$FLAGS --min-instances=${{ inputs.min-instances }}"
+          FLAGS="$FLAGS --max-instances=${{ inputs.max-instances }}"
+          if [ -n "${{ inputs.env-vars }}" ]; then
+            FLAGS="$FLAGS --set-env-vars=${{ inputs.env-vars }}"
+          fi
+          if [ -n "${{ inputs.secrets-mapping }}" ]; then
+            FLAGS="$FLAGS --set-secrets=${{ inputs.secrets-mapping }}"
+          fi
+          echo "flags=$FLAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy new revision (no traffic)
+        id: deploy-new
+        if: inputs.skip-canary == false
+        run: |
+          REVISION_TAG="canary-${{ github.sha }}"
+          gcloud run deploy ${{ inputs.service }} \
+            ${{ steps.flags.outputs.flags }} \
+            --no-traffic \
+            --tag=$REVISION_TAG
+
+          REVISION=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --format='value(status.traffic[0].revisionName)')
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          echo "tag=$REVISION_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Shift traffic to canary
+        if: inputs.skip-canary == false
+        run: |
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --to-tags=${{ steps.deploy-new.outputs.tag }}=${{ inputs.canary-percent }}
+
+      - name: Report canary started
+        if: inputs.skip-canary == false
+        env:
+          FEEDBACK_HUB_URL: ${{ inputs.feedback-hub-url }}
+          FEEDBACK_HUB_API_KEY: ${{ secrets.FEEDBACK_HUB_API_KEY }}
+        run: |
+          bash .gundo-workflows/scripts/report-deployment.sh \
+            --project="${{ inputs.service }}" \
+            --commit="${{ github.sha }}" \
+            --status="canary" \
+            --revision="${{ steps.deploy-new.outputs.revision }}" \
+            --traffic-percent=${{ inputs.canary-percent }}
+
+      - name: Watch canary SLO
+        id: watch
+        if: inputs.skip-canary == false
+        continue-on-error: true
+        run: |
+          bash .gundo-workflows/scripts/canary-watch.sh \
+            --service="${{ inputs.service }}" \
+            --project="${{ inputs.gcp-project }}" \
+            --region="${{ inputs.gcp-region }}" \
+            --revision-tag="${{ steps.deploy-new.outputs.tag }}" \
+            --duration=${{ inputs.canary-duration-seconds }} \
+            --max-error-rate=${{ inputs.max-error-rate }} \
+            --max-p95-ms=${{ inputs.max-p95-latency-ms }}
+
+      - name: Promote canary to 100%
+        id: promote
+        if: inputs.skip-canary == false && steps.watch.outcome == 'success'
+        run: |
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --to-tags=${{ steps.deploy-new.outputs.tag }}=100
+
+          # Label new revision as stable, remove label from prev
+          gcloud run revisions update ${{ steps.deploy-new.outputs.revision }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --update-labels=stable=true
+
+      - name: Rollback
+        id: rollback
+        if: inputs.skip-canary == false && steps.watch.outcome == 'failure'
+        run: |
+          STABLE_REVISION=$(gcloud run revisions list \
+            --service=${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --filter='metadata.labels.stable=true AND NOT metadata.name=${{ steps.deploy-new.outputs.revision }}' \
+            --format='value(metadata.name)' \
+            --limit=1)
+
+          if [ -z "$STABLE_REVISION" ]; then
+            echo "::error::No stable revision found for rollback"
+            exit 1
+          fi
+
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --to-revisions=$STABLE_REVISION=100
+
+          echo "Rolled back to $STABLE_REVISION"
+          echo "stable-revision=$STABLE_REVISION" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy direct (skip canary, emergency)
+        if: inputs.skip-canary == true
+        run: |
+          gcloud run deploy ${{ inputs.service }} \
+            ${{ steps.flags.outputs.flags }}
+
+      - name: Determine outcome
+        id: outcome
+        if: always()
+        run: |
+          if [ "${{ inputs.skip-canary }}" = "true" ]; then
+            echo "status=promoted" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.watch.outcome }}" = "success" ]; then
+            echo "status=promoted" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.rollback.outcome }}" = "success" ]; then
+            echo "status=rolled_back" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report final status
+        if: always()
+        env:
+          FEEDBACK_HUB_URL: ${{ inputs.feedback-hub-url }}
+          FEEDBACK_HUB_API_KEY: ${{ secrets.FEEDBACK_HUB_API_KEY }}
+        run: |
+          bash .gundo-workflows/scripts/report-deployment.sh \
+            --project="${{ inputs.service }}" \
+            --commit="${{ github.sha }}" \
+            --status="${{ steps.outcome.outputs.status }}" \
+            --revision="${{ steps.deploy-new.outputs.revision }}"
+
+      - name: Fail job if rolled back or failed
+        if: steps.outcome.outputs.status != 'promoted'
+        run: |
+          echo "::error::Deploy ended with status ${{ steps.outcome.outputs.status }}"
+          exit 1
