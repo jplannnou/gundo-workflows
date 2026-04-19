@@ -20,6 +20,14 @@
 #   1 = SLO breached -> trigger rollback
 #   2 = Script error (missing args, API failure, etc.)
 # ==============================================================================
+# GitHub Actions invokes scripts with `bash -e` by default (see the shell
+# preamble in the workflow log: `shell: /usr/bin/bash -e {0}`). We explicitly
+# disable it here because this script tolerates gcloud failures and empty
+# metric pipes — see the long note below. Without this `set +e`, the `-e`
+# from the harness kills the script on the first `gcloud monitoring` pipe
+# that returns a non-zero exit, making every canary deploy appear to breach
+# SLO and rolling back healthy revisions.
+set +e
 set -u
 # NOTE: We intentionally do NOT use `-e` or `-o pipefail` here. A missing
 # metric (common when the canary receives zero traffic in the first minute,
