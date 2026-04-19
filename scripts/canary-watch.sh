@@ -25,7 +25,7 @@ set -euo pipefail
 SERVICE=""
 PROJECT=""
 REGION="us-central1"
-REVISION_TAG=""
+REVISION=""
 DURATION=300
 MAX_ERROR_RATE=0.01
 MAX_P95_MS=1500
@@ -37,7 +37,7 @@ for arg in "$@"; do
     --service=*) SERVICE="${arg#*=}" ;;
     --project=*) PROJECT="${arg#*=}" ;;
     --region=*) REGION="${arg#*=}" ;;
-    --revision-tag=*) REVISION_TAG="${arg#*=}" ;;
+    --revision=*|--revision-name=*) REVISION="${arg#*=}" ;;
     --duration=*) DURATION="${arg#*=}" ;;
     --max-error-rate=*) MAX_ERROR_RATE="${arg#*=}" ;;
     --max-p95-ms=*) MAX_P95_MS="${arg#*=}" ;;
@@ -47,8 +47,8 @@ for arg in "$@"; do
   esac
 done
 
-if [ -z "$SERVICE" ] || [ -z "$PROJECT" ] || [ -z "$REVISION_TAG" ]; then
-  echo "Missing required args. Need --service, --project, --revision-tag" >&2
+if [ -z "$SERVICE" ] || [ -z "$PROJECT" ] || [ -z "$REVISION" ]; then
+  echo "Missing required args. Need --service, --project, --revision" >&2
   exit 2
 fi
 
@@ -56,7 +56,7 @@ echo "::group::Canary watch config"
 echo "  service:        $SERVICE"
 echo "  project:        $PROJECT"
 echo "  region:         $REGION"
-echo "  revision-tag:   $REVISION_TAG"
+echo "  revision:       $REVISION"
 echo "  duration:       ${DURATION}s"
 echo "  max-error-rate: $MAX_ERROR_RATE"
 echo "  max-p95-ms:     $MAX_P95_MS"
@@ -75,7 +75,7 @@ query_metric() {
 
   gcloud monitoring time-series list \
     --project="$PROJECT" \
-    --filter="metric.type=\"$metric\" AND resource.labels.service_name=\"$SERVICE\" AND metric.labels.revision_name=~\".*${REVISION_TAG}.*\" $filter" \
+    --filter="metric.type=\"$metric\" AND resource.labels.service_name=\"$SERVICE\" AND metric.labels.revision_name=\"${REVISION}\" $filter" \
     --interval-end-time="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --interval-start-time="$(date -u -d "-${window_secs} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-${window_secs}S +%Y-%m-%dT%H:%M:%SZ)" \
     --format="value(points[0].value.doubleValue,points[0].value.int64Value)" 2>/dev/null | \

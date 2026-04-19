@@ -211,7 +211,7 @@ jobs:
             --service="${{ inputs.service }}" \
             --project="${{ inputs.gcp-project }}" \
             --region="${{ inputs.gcp-region }}" \
-            --revision-tag="${{ steps.deploy-new.outputs.tag }}" \
+            --revision="${{ steps.deploy-new.outputs.revision }}" \
             --duration=${{ inputs.canary-duration-seconds }} \
             --max-error-rate=${{ inputs.max-error-rate }} \
             --max-p95-ms=${{ inputs.max-p95-latency-ms }}
