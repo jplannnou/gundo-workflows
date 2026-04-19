@@ -76,10 +76,16 @@ PAYLOAD=$(cat <<EOF
 EOF
 )
 
+# Feedback Hub's ApiKeyGuard reads `x-feedback-api-key` (not `x-api-key`)
+# and also requires an `x-feedback-user-email` header. For CI events we
+# use a synthetic `ci@gundo.life` — the real commit author is already
+# captured inside the payload.
 HTTP_CODE=$(curl -s -o /tmp/devops-response.json -w "%{http_code}" \
   -X POST "$FEEDBACK_HUB_URL/api/devops/deployments" \
   -H "Content-Type: application/json" \
-  -H "x-api-key: $FEEDBACK_HUB_API_KEY" \
+  -H "x-feedback-api-key: $FEEDBACK_HUB_API_KEY" \
+  -H "x-feedback-user-email: ci@gundo.life" \
+  -H "x-feedback-user-name: GitHub Actions" \
   --data "$PAYLOAD" \
   --max-time 10 || echo "000")
 
