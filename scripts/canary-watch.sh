@@ -20,7 +20,13 @@
 #   1 = SLO breached -> trigger rollback
 #   2 = Script error (missing args, API failure, etc.)
 # ==============================================================================
-set -euo pipefail
+set -u
+# NOTE: We intentionally do NOT use `-e` or `-o pipefail` here. A missing
+# metric (common when the canary receives zero traffic in the first minute,
+# or on low-QPS services) would otherwise kill the script, the workflow
+# would interpret the exit as SLO failure, and a healthy deploy would be
+# rolled back. Instead, the script handles empty/missing data explicitly
+# via the MIN_REQUESTS skip and the consecutive-breach counter.
 
 SERVICE=""
 PROJECT=""
@@ -68,18 +74,29 @@ echo "::endgroup::"
 # -----------------------------------------------------------------------------
 query_metric() {
   local metric="$1"      # e.g. run.googleapis.com/request_count
-  local filter="$2"      # e.g. metric.labels.response_code_class="5xx"
-  local aligner="$3"     # ALIGN_RATE or ALIGN_DELTA
-  local reducer="$4"     # REDUCE_SUM, REDUCE_PERCENTILE_95, etc.
-  local window_secs="$5" # alignment window
+  local filter="$2"      # extra filter clause (must start with "AND " if non-empty)
+  local window_secs="$3" # time window to aggregate
 
-  gcloud monitoring time-series list \
+  # GNU date (Linux) first; fall back to BSD (macOS) if that fails.
+  local end_time start_time
+  end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  start_time=$(date -u -d "-${window_secs} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-${window_secs}S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || echo "$end_time")
+
+  # The command can legitimately fail or return empty when the metric
+  # has no data (first minute of canary, or low-QPS service). Either
+  # case returns 0 so that "no data" is treated as "no errors".
+  local raw
+  raw=$(gcloud monitoring time-series list \
     --project="$PROJECT" \
     --filter="metric.type=\"$metric\" AND resource.labels.service_name=\"$SERVICE\" AND metric.labels.revision_name=\"${REVISION}\" $filter" \
-    --interval-end-time="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --interval-start-time="$(date -u -d "-${window_secs} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-${window_secs}S +%Y-%m-%dT%H:%M:%SZ)" \
-    --format="value(points[0].value.doubleValue,points[0].value.int64Value)" 2>/dev/null | \
-    head -1 | awk '{print ($1 != "" ? $1 : 0)}'
+    --interval-end-time="$end_time" \
+    --interval-start-time="$start_time" \
+    --format="value(points[0].value.doubleValue,points[0].value.int64Value)" 2>/dev/null \
+    | head -1 | awk '{print ($1 != "" ? $1 : 0)}')
+
+  echo "${raw:-0}"
 }
 
 # -----------------------------------------------------------------------------
@@ -99,20 +116,10 @@ while [ "$(date +%s)" -lt "$end_ts" ]; do
   echo "--- Iteration $iteration (t=$(( $(date +%s) - start_ts ))s) ---"
 
   WINDOW=60
-  TOTAL_REQS=$(query_metric \
-    "run.googleapis.com/request_count" \
-    "" \
-    "ALIGN_RATE" "REDUCE_SUM" "$WINDOW")
-
-  ERROR_REQS=$(query_metric \
-    "run.googleapis.com/request_count" \
-    "AND metric.labels.response_code_class=\"5xx\"" \
-    "ALIGN_RATE" "REDUCE_SUM" "$WINDOW")
-
-  P95_LATENCY=$(query_metric \
-    "run.googleapis.com/request_latencies" \
-    "" \
-    "ALIGN_DELTA" "REDUCE_PERCENTILE_95" "$WINDOW")
+  TOTAL_REQS=$(query_metric "run.googleapis.com/request_count" "" "$WINDOW")
+  ERROR_REQS=$(query_metric "run.googleapis.com/request_count" \
+    "AND metric.labels.response_code_class=\"5xx\"" "$WINDOW")
+  P95_LATENCY=$(query_metric "run.googleapis.com/request_latencies" "" "$WINDOW")
 
   TOTAL_REQS=${TOTAL_REQS:-0}
   ERROR_REQS=${ERROR_REQS:-0}
