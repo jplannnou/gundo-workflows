@@ -125,6 +125,9 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: Configure docker auth for Artifact Registry
+        run: gcloud auth configure-docker "${{ inputs.gcp-region }}-docker.pkg.dev" --quiet
+
       - name: Verify image signature (Cosign)
         run: |
           curl -L https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 \
