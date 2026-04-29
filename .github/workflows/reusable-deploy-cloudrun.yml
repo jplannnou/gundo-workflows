@@ -125,13 +125,19 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure docker auth for Artifact Registry
-        run: gcloud auth configure-docker "${{ inputs.gcp-region }}-docker.pkg.dev" --quiet
-
-      - name: Verify image signature (Cosign)
+      - name: Install Cosign
         run: |
           curl -L https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 \
             -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+
+      - name: Login cosign to Artifact Registry
+        run: |
+          gcloud auth print-access-token \
+            | cosign login "${{ inputs.gcp-region }}-docker.pkg.dev" \
+                -u oauth2accesstoken --password-stdin
+
+      - name: Verify image signature (Cosign)
+        run: |
           COSIGN_EXPERIMENTAL=1 cosign verify \
             --certificate-identity-regexp="https://github.com/${{ github.repository_owner }}/.*" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
