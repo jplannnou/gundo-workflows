@@ -235,12 +235,6 @@ jobs:
             --project=${{ inputs.gcp-project }} \
             --to-tags=${{ steps.deploy-new.outputs.tag }}=100
 
-          # Label new revision as stable, remove label from prev
-          gcloud run revisions update ${{ steps.deploy-new.outputs.revision }} \
-            --region=${{ inputs.gcp-region }} \
-            --project=${{ inputs.gcp-project }} \
-            --update-labels=stable=true
-
       - name: Rollback
         id: rollback
         if: inputs.skip-canary == false && steps.watch.outcome == 'failure'
