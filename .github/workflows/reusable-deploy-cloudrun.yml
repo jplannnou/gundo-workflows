@@ -177,7 +177,8 @@ jobs:
         id: deploy-new
         if: inputs.skip-canary == false
         run: |
-          REVISION_TAG="canary-${{ github.sha }}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          REVISION_TAG="canary-$SHORT_SHA"
           gcloud run deploy ${{ inputs.service }} \
             ${{ steps.flags.outputs.flags }} \
             --no-traffic \
