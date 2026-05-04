@@ -233,7 +233,8 @@ jobs:
           gcloud run services update-traffic ${{ inputs.service }} \
             --region=${{ inputs.gcp-region }} \
             --project=${{ inputs.gcp-project }} \
-            --to-tags=${{ steps.deploy-new.outputs.tag }}=100
+            --to-revisions=${{ steps.deploy-new.outputs.revision }}=100 \
+            --remove-tags=${{ steps.deploy-new.outputs.tag }}
 
       - name: Rollback
         id: rollback
@@ -255,7 +256,8 @@ jobs:
           gcloud run services update-traffic ${{ inputs.service }} \
             --region=${{ inputs.gcp-region }} \
             --project=${{ inputs.gcp-project }} \
-            --to-revisions=$STABLE_REVISION=100
+            --to-revisions=$STABLE_REVISION=100 \
+            --remove-tags=${{ steps.deploy-new.outputs.tag }}
 
           echo "Rolled back to $STABLE_REVISION"
           echo "stable-revision=$STABLE_REVISION" >> "$GITHUB_OUTPUT"
