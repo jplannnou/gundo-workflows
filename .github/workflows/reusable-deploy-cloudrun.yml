@@ -268,6 +268,21 @@ jobs:
           gcloud run deploy ${{ inputs.service }} \
             ${{ steps.flags.outputs.flags }}
 
+      # Belt-and-braces: if the job is cancelled mid-flight (concurrency
+      # cancel-in-progress, manual cancel, runner timeout) the promote and
+      # rollback steps never execute, leaving canary-<sha> pinned to the new
+      # revision and billing it 24/7. This step runs on every terminal state
+      # — success, failure, cancellation — and untags whatever the deploy
+      # step created. Idempotent: --remove-tags on a missing tag is a no-op.
+      - name: Cleanup canary tag (always)
+        if: always() && steps.deploy-new.outputs.tag != ''
+        run: |
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --remove-tags=${{ steps.deploy-new.outputs.tag }} \
+            --quiet || true
+
       - name: Determine outcome
         id: outcome
         if: always()
