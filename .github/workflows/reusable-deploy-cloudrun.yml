@@ -313,10 +313,30 @@ jobs:
             --no-traffic \
             --tag=$REVISION_TAG
 
-          REVISION=$(gcloud run services describe ${{ inputs.service }} \
-            --region=${{ inputs.gcp-region }} \
-            --project=${{ inputs.gcp-project }} \
-            --format='value(status.traffic[0].revisionName)')
+          # Resolve the new canary revision by tag — do NOT use traffic[0],
+          # which after `--no-traffic --tag=canary-X` points to the PREVIOUS
+          # revision (still serving 100%) rather than the freshly created one.
+          # Discovered 2026-05-08 on the Radar pilot (PR #42): the workflow
+          # captured the old revision and "promoted" it to 100% (effective no-op),
+          # leaving the new revision orphaned at 0% with the canary tag stripped
+          # by the post-promote cleanup. Tag-based lookup matches what the
+          # Radar/Engine/Feedback inline ci.yml jobs always did.
+          for i in $(seq 1 5); do
+            REVISION=$(gcloud run services describe ${{ inputs.service }} \
+              --region=${{ inputs.gcp-region }} \
+              --project=${{ inputs.gcp-project }} \
+              --format=json | jq -r --arg tag "$REVISION_TAG" \
+              '.status.traffic[] | select(.tag == $tag) | .revisionName' | head -1)
+            if [ -n "$REVISION" ] && [ "$REVISION" != "null" ]; then break; fi
+            echo "  [$i] tag '$REVISION_TAG' not yet visible, retrying in 3s..."
+            sleep 3
+          done
+
+          if [ -z "$REVISION" ] || [ "$REVISION" = "null" ]; then
+            echo "::error::Could not resolve revision by tag '$REVISION_TAG' after 5 retries"
+            exit 1
+          fi
+          echo "Canary revision: $REVISION"
           echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
           echo "tag=$REVISION_TAG" >> "$GITHUB_OUTPUT"
 
