@@ -41,13 +41,20 @@ on:
         type: string
         required: true
       secrets-mapping:
-        description: 'Comma-separated MOUNT=SECRET:VERSION pairs for --set-secrets'
+        description: 'MOUNT=SECRET:VERSION pairs for --set-secrets, separated by `env-vars-separator`'
         type: string
         default: ''
       env-vars:
-        description: 'Comma-separated KEY=VALUE pairs for --set-env-vars'
+        description: 'KEY=VALUE pairs for --set-env-vars, separated by `env-vars-separator`'
         type: string
         default: ''
+      env-vars-separator:
+        description: |
+          Custom delimiter for env-vars / secrets-mapping. Default `,`. Pass `||`
+          (or any non-comma char) when values contain commas (URLs, lists). The
+          step prepends the gcloud sentinel `^<sep>^` automatically.
+        type: string
+        default: ','
       memory:
         type: string
         default: '1Gi'
@@ -86,6 +93,37 @@ on:
         description: 'If true, deploy directly to 100% (emergency use only)'
         type: boolean
         default: false
+      cpu-boost:
+        description: 'Enable CPU boost on startup (faster cold starts)'
+        type: boolean
+        default: false
+      session-affinity:
+        description: 'Enable session affinity (sticky sessions)'
+        type: boolean
+        default: false
+      allow-unauthenticated:
+        description: |
+          If true, the service is publicly invokable (--allow-unauthenticated).
+          If false, only authenticated callers can invoke it (--no-allow-unauthenticated).
+          Default false: secure by default.
+        type: boolean
+        default: false
+      vpc-connector:
+        description: 'Serverless VPC Access connector name (omit if not using VPC).'
+        type: string
+        default: ''
+      vpc-egress:
+        description: 'VPC egress mode: all-traffic | private-ranges-only. Requires vpc-connector.'
+        type: string
+        default: ''
+      cloudsql-instances:
+        description: 'Comma-separated Cloud SQL instance connection names for --add-cloudsql-instances.'
+        type: string
+        default: ''
+      port:
+        description: 'Container port (defaults to 8080 in Cloud Run if omitted).'
+        type: string
+        default: ''
       feedback-hub-url:
         description: 'Base URL of Feedback Hub API'
         type: string
@@ -156,6 +194,10 @@ jobs:
 
       - name: Build deploy flags
         id: flags
+        env:
+          ENV_VARS: ${{ inputs.env-vars }}
+          SECRETS_MAPPING: ${{ inputs.secrets-mapping }}
+          ENV_VARS_SEP: ${{ inputs.env-vars-separator }}
         run: |
           FLAGS="--image=${{ inputs.image }}"
           FLAGS="$FLAGS --region=${{ inputs.gcp-region }}"
@@ -165,12 +207,59 @@ jobs:
           FLAGS="$FLAGS --concurrency=${{ inputs.concurrency }} --timeout=${{ inputs.timeout }}"
           FLAGS="$FLAGS --min-instances=${{ inputs.min-instances }}"
           FLAGS="$FLAGS --max-instances=${{ inputs.max-instances }}"
-          if [ -n "${{ inputs.env-vars }}" ]; then
-            FLAGS="$FLAGS --set-env-vars=${{ inputs.env-vars }}"
+
+          # Auth posture (default secure: --no-allow-unauthenticated)
+          if [ "${{ inputs.allow-unauthenticated }}" = "true" ]; then
+            FLAGS="$FLAGS --allow-unauthenticated"
+          else
+            FLAGS="$FLAGS --no-allow-unauthenticated"
           fi
-          if [ -n "${{ inputs.secrets-mapping }}" ]; then
-            FLAGS="$FLAGS --set-secrets=${{ inputs.secrets-mapping }}"
+
+          # Optional perf flags
+          if [ "${{ inputs.cpu-boost }}" = "true" ]; then
+            FLAGS="$FLAGS --cpu-boost"
           fi
+          if [ "${{ inputs.session-affinity }}" = "true" ]; then
+            FLAGS="$FLAGS --session-affinity"
+          fi
+
+          # Optional networking
+          if [ -n "${{ inputs.vpc-connector }}" ]; then
+            FLAGS="$FLAGS --vpc-connector=${{ inputs.vpc-connector }}"
+          fi
+          if [ -n "${{ inputs.vpc-egress }}" ]; then
+            FLAGS="$FLAGS --vpc-egress=${{ inputs.vpc-egress }}"
+          fi
+
+          # Optional Cloud SQL connections
+          if [ -n "${{ inputs.cloudsql-instances }}" ]; then
+            FLAGS="$FLAGS --add-cloudsql-instances=${{ inputs.cloudsql-instances }}"
+          fi
+
+          # Optional container port (Cloud Run defaults to 8080 when omitted)
+          if [ -n "${{ inputs.port }}" ]; then
+            FLAGS="$FLAGS --port=${{ inputs.port }}"
+          fi
+
+          # Env vars and secrets — emit values via stdout/$GITHUB_OUTPUT only
+          # if they are non-empty. When the separator is not the default `,`,
+          # prepend gcloud's `^<sep>^` sentinel so commas inside values don't
+          # split the list (e.g. ALLOWED_ORIGINS=https://a,https://b).
+          if [ -n "$ENV_VARS" ]; then
+            if [ "$ENV_VARS_SEP" = "," ]; then
+              FLAGS="$FLAGS --set-env-vars=$ENV_VARS"
+            else
+              FLAGS="$FLAGS --set-env-vars=^${ENV_VARS_SEP}^${ENV_VARS}"
+            fi
+          fi
+          if [ -n "$SECRETS_MAPPING" ]; then
+            if [ "$ENV_VARS_SEP" = "," ]; then
+              FLAGS="$FLAGS --set-secrets=$SECRETS_MAPPING"
+            else
+              FLAGS="$FLAGS --set-secrets=^${ENV_VARS_SEP}^${SECRETS_MAPPING}"
+            fi
+          fi
+
           echo "flags=$FLAGS" >> "$GITHUB_OUTPUT"
 
       - name: Deploy new revision (no traffic)

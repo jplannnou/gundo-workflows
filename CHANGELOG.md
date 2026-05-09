@@ -9,6 +9,17 @@ All notable changes to `gundo-workflows` are documented here.
 - `reusable-deploy-cloudrun.yml`: added an `if: always()` cleanup step that runs `--remove-tags` even when the job is cancelled mid-flight (concurrency `cancel-in-progress`, manual cancel, runner timeout). Without this guard, a cancelled deploy that already created the canary revision would leave the tag pinned forever — same end state as the pre-fix bug. Edge case discovered 2026-05-08 when consecutive merges to `main` cancelled an in-progress Engine deploy and orphaned `canary-1820f93`. Idempotent: `--remove-tags` on a missing tag is a no-op.
 
 ### Added
+- `reusable-deploy-cloudrun.yml`: 7 new optional inputs to cover the flag surface used by Engine, Radar and Feedback Hub before they migrate off their inline `ci.yml` deploy jobs:
+  - `cpu-boost` (boolean, default false) — `--cpu-boost`
+  - `session-affinity` (boolean, default false) — `--session-affinity`
+  - `allow-unauthenticated` (boolean, default false) — emits `--allow-unauthenticated` when true, `--no-allow-unauthenticated` when false (secure by default)
+  - `vpc-connector` (string, default '') — `--vpc-connector=<name>`
+  - `vpc-egress` (string, default '') — `--vpc-egress=all-traffic|private-ranges-only`
+  - `cloudsql-instances` (string, default '') — `--add-cloudsql-instances=<list>`
+  - `port` (string, default '') — `--port=<n>` (Cloud Run defaults to 8080 when omitted)
+- `reusable-deploy-cloudrun.yml`: new input `env-vars-separator` (default `,`). Pass `||` (or any non-comma char) when env values contain commas (URLs, allow-lists). The step prepends gcloud's `^<sep>^` sentinel automatically. Mirrors the existing pattern used in `gundo-feedback/cloudbuild.yaml` for `ALLOWED_ORIGINS`.
+
+### Added
 - Initial repo structure (Fase 0 of the Deploy Unificado Gundo plan).
 - `reusable-ci.yml` — lint + typecheck + build + test + Trivy scan matrix over pnpm workspaces.
 - `reusable-build-sign.yml` — Docker build + push to Artifact Registry + Cosign keyless sign + SPDX SBOM via syft + image scan.
