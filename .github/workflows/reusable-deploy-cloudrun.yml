@@ -137,6 +137,22 @@ on:
         description: 'Base URL of Feedback Hub API'
         type: string
         default: 'https://gundo-content-engine-xlpp333cua-uc.a.run.app'
+      public-access:
+        description: |
+          Grant `allUsers/run.invoker` at the service level so unauthenticated
+          requests are allowed (required for any public B2C/marketing service).
+          Idempotent — safe to leave `true` across deploys. Default `false` so
+          private/internal services (admin tools, backend APIs behind auth) are
+          not accidentally exposed.
+
+          IMPORTANT: without this, Cloud Run only allows public traffic if some
+          OTHER mechanism granted allUsers (e.g. a one-off `gcloud add-iam-policy-binding`
+          or — historically — a tag-pinned binding). Tag-pinned bindings vanish
+          when `--remove-tags` runs, taking the entire service down silently.
+          Setting this `true` makes the binding service-level and immune.
+          See incident memory `incident-cloud-run-remove-tags-strips-iam-2026-05-08.md`.
+        type: boolean
+        default: false
     secrets:
       FEEDBACK_HUB_API_KEY:
         description: 'API key for Feedback Hub /api/devops endpoints'
@@ -271,6 +287,20 @@ jobs:
           fi
 
           echo "flags=$FLAGS" >> "$GITHUB_OUTPUT"
+
+      # Service-level IAM grant for public access. Idempotent — re-applying the
+      # same binding is a no-op. Runs BEFORE the canary deploy so the new
+      # revision is reachable from outside the moment traffic shifts to it.
+      # If `public-access: false` (default), this step is skipped and any
+      # existing IAM stays intact (we never REMOVE bindings here).
+      - name: Grant public access (allUsers/run.invoker) at service level
+        if: inputs.public-access == true
+        run: |
+          gcloud run services add-iam-policy-binding ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --member=allUsers \
+            --role=roles/run.invoker
 
       - name: Deploy new revision (no traffic)
         id: deploy-new
