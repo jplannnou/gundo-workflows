@@ -124,6 +124,15 @@ on:
         description: 'Container port (defaults to 8080 in Cloud Run if omitted).'
         type: string
         default: ''
+      verify-signature:
+        description: |
+          Verify image with Cosign keyless OIDC before deploying. Default true.
+          Set false when the image was built outside `reusable-build-sign.yml`
+          (e.g. plain `gcloud builds submit` with no signing step). Tech debt:
+          consumers using Cloud Build should add a sign step and flip this back
+          to true.
+        type: boolean
+        default: true
       feedback-hub-url:
         description: 'Base URL of Feedback Hub API'
         type: string
@@ -175,6 +184,7 @@ jobs:
                 -u oauth2accesstoken --password-stdin
 
       - name: Verify image signature (Cosign)
+        if: inputs.verify-signature == true
         run: |
           COSIGN_EXPERIMENTAL=1 cosign verify \
             --certificate-identity-regexp="https://github.com/${{ github.repository_owner }}/.*" \

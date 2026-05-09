@@ -18,6 +18,7 @@ All notable changes to `gundo-workflows` are documented here.
   - `cloudsql-instances` (string, default '') — `--add-cloudsql-instances=<list>`
   - `port` (string, default '') — `--port=<n>` (Cloud Run defaults to 8080 when omitted)
 - `reusable-deploy-cloudrun.yml`: new input `env-vars-separator` (default `,`). Pass `||` (or any non-comma char) when env values contain commas (URLs, allow-lists). The step prepends gcloud's `^<sep>^` sentinel automatically. Mirrors the existing pattern used in `gundo-feedback/cloudbuild.yaml` for `ALLOWED_ORIGINS`.
+- `reusable-deploy-cloudrun.yml`: new input `verify-signature` (boolean, default `true`). Set to `false` when the image was built outside `reusable-build-sign.yml` (e.g. plain `gcloud builds submit` with no Cosign step). Required for the Engine / Radar / Feedback Hub migration pilot because their existing `cloudbuild.yaml` build pipelines do not yet sign images. Tech debt: those repos should add a Cosign sign step to their Cloud Build config and flip this back to `true`.
 
 ### Added
 - Initial repo structure (Fase 0 of the Deploy Unificado Gundo plan).
