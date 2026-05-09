@@ -6,6 +6,7 @@ All notable changes to `gundo-workflows` are documented here.
 
 ### Fixed
 - `reusable-deploy-cloudrun.yml`: remove `canary-<sha>` tag after promote/rollback to prevent revisions from being pinned indefinitely. Pinned tags kept old revisions running 24/7 even when a service template was updated to safe defaults — the bug surfaced as €76/day Cloud Run bleed across Engine + Radar + Finance + Genie in May 2026 (122 stale canary tags accumulated). Promote now uses `--to-revisions=$REV=100 --remove-tags=$TAG` (atomic), rollback uses the same pattern when restoring the stable revision. Behavior is unchanged for consumers; cleanup happens transparently.
+- `reusable-deploy-cloudrun.yml`: added an `if: always()` cleanup step that runs `--remove-tags` even when the job is cancelled mid-flight (concurrency `cancel-in-progress`, manual cancel, runner timeout). Without this guard, a cancelled deploy that already created the canary revision would leave the tag pinned forever — same end state as the pre-fix bug. Edge case discovered 2026-05-08 when consecutive merges to `main` cancelled an in-progress Engine deploy and orphaned `canary-1820f93`. Idempotent: `--remove-tags` on a missing tag is a no-op.
 
 ### Added
 - Initial repo structure (Fase 0 of the Deploy Unificado Gundo plan).
