@@ -103,9 +103,18 @@ on:
         default: false
       allow-unauthenticated:
         description: |
-          If true, passes `--allow-unauthenticated` to `gcloud run deploy`,
-          which atomically binds `allUsers/run.invoker` at the SERVICE level
-          (immune to `--remove-tags` cleanup).
+          If true, passes `--allow-unauthenticated` to `gcloud run deploy` AND
+          re-binds `allUsers/run.invoker` at the SERVICE level after every
+          `update-traffic` call (promote, rollback, cleanup). The initial
+          `gcloud run deploy --allow-unauthenticated` is NOT enough on its
+          own: the subsequent `update-traffic --remove-tags=canary-X` call
+          re-serializes the service config and silently drops the public
+          binding. We discovered this 2026-05-21 when gundo-ecommerce-ui
+          (which had `allow-unauthenticated: true` set since 2026-05-12)
+          went 403-only after a routine main-branch deploy — the 4th IAM
+          strip incident in this codebase. The re-bind step below makes
+          the binding genuinely sticky across all canary lifecycle paths.
+
           If false, passes `--no-allow-unauthenticated`, which STRIPS any
           existing public binding — keep this default for private services.
           Set true for any public B2C/marketing service.
@@ -422,6 +431,33 @@ jobs:
             --project=${{ inputs.gcp-project }} \
             --remove-tags=${{ steps.deploy-new.outputs.tag }} \
             --quiet || true
+
+      # Re-bind allUsers/run.invoker at SERVICE level after every
+      # `update-traffic` call. The promote step (line ~369) and the cleanup
+      # step above both invoke `gcloud run services update-traffic ...
+      # --remove-tags=...`, which silently drops the public IAM binding even
+      # when the initial `gcloud run deploy --allow-unauthenticated` set it
+      # atomically. Without this re-bind the service goes 403-only ~2-3
+      # minutes after deploy completes, breaking every public B2C surface
+      # until someone notices and runs `add-iam-policy-binding` by hand.
+      #
+      # We re-apply on `always()` so it runs after promote AND after rollback
+      # AND after cancellation. Idempotent: if the binding already exists,
+      # gcloud returns success without modifying the policy. Skipped entirely
+      # when allow-unauthenticated is false (private services keep their
+      # existing posture untouched).
+      #
+      # See: incident-cloud-run-remove-tags-strips-iam-2026-05-08.md and the
+      # 4th recurrence on gundo-ecommerce-ui 2026-05-21.
+      - name: Re-bind public access (always, post-update-traffic)
+        if: always() && inputs.allow-unauthenticated == true
+        run: |
+          gcloud run services add-iam-policy-binding ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --member=allUsers \
+            --role=roles/run.invoker \
+            --quiet
 
       - name: Determine outcome
         id: outcome
