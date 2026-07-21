@@ -15,6 +15,13 @@ name: Reusable Cloud Run Deploy (canary + auto-rollback)
 on:
   workflow_call:
     inputs:
+      runner:
+        description: >-
+          Label del runner donde corre el job de deploy. Default ubuntu-latest
+          (GitHub-hosted). Los repos del org pasan `gundo-local` para usar los
+          self-hosted runners (migración 2026-07 por cuota de minutos).
+        type: string
+        default: 'ubuntu-latest'
       gcp-project:
         type: string
         required: true
@@ -163,7 +170,7 @@ permissions:
 jobs:
   deploy:
     name: Canary deploy
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     outputs:
       status: ${{ steps.outcome.outputs.status }}
       revision: ${{ steps.deploy-new.outputs.revision }}
