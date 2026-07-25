@@ -21,6 +21,10 @@ on:
         description: 'Runner label. gundo-local = self-hosted (default hosted por compatibilidad).'
         type: string
         default: 'ubuntu-latest'
+      run-lint:
+        description: 'Correr lint. false = repo aun sin config de ESLint estandar (adopcion por fases).'
+        type: boolean
+        default: true
       node-version:
         description: 'Node.js version'
         type: string
@@ -89,6 +93,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
 
       - name: Lint
+        if: inputs.run-lint
         run: pnpm lint
 
       - name: Typecheck
