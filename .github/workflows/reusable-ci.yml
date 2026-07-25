@@ -17,6 +17,10 @@ name: Reusable CI
 on:
   workflow_call:
     inputs:
+      runner:
+        description: 'Runner label. gundo-local = self-hosted (default hosted por compatibilidad).'
+        type: string
+        default: 'ubuntu-latest'
       node-version:
         description: 'Node.js version'
         type: string
@@ -53,7 +57,7 @@ on:
 jobs:
   workspace-matrix:
     name: Build workspace
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -120,7 +124,7 @@ jobs:
 
   security-scan:
     name: Security scan
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     if: inputs.run-trivy
     steps:
       - name: Checkout
