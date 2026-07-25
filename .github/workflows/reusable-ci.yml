@@ -59,13 +59,27 @@ on:
         required: false
 
 jobs:
+  prepare:
+    name: Resolve workspace matrix
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      workspaces: ${{ steps.split.outputs.json }}
+    steps:
+      # GitHub Actions NO tiene funcion replace() en sus expresiones, asi que la
+      # lista separada por comas se parte aca con jq. El matrix hardcodeado con
+      # replace() daba startup_failure (jobs vacios) — nunca se noto porque el
+      # reusable no tenia consumidores.
+      - id: split
+        run: echo "json=$(echo '${{ inputs.workspaces }}' | jq -R -c 'split(",")')" >> "$GITHUB_OUTPUT"
+
   workspace-matrix:
     name: Build workspace
+    needs: prepare
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
-        workspace: ${{ fromJSON(format('["{0}"]', replace(inputs.workspaces, ',', '","'))) }}
+        workspace: ${{ fromJSON(needs.prepare.outputs.workspaces) }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}/${{ matrix.workspace }}
