@@ -82,7 +82,9 @@ jobs:
         workspace: ${{ fromJSON(needs.prepare.outputs.workspaces) }}
     defaults:
       run:
-        working-directory: ${{ inputs.working-directory }}/${{ matrix.workspace }}
+        # matrix.workspace ya es la ruta efectiva (default '.'); para repos
+        # anidados el caller pasa workspaces con la subruta (ej. 'apps/api').
+        working-directory: ${{ matrix.workspace }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -97,7 +99,9 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
-          cache-dependency-path: '${{ inputs.working-directory }}/${{ matrix.workspace }}/pnpm-lock.yaml'
+          # setup-node rechaza '.' en el glob ('././pnpm-lock.yaml' invalido),
+          # asi que en single-package (workspace='.') va la ruta raiz pelada.
+          cache-dependency-path: ${{ matrix.workspace == '.' && 'pnpm-lock.yaml' || format('{0}/pnpm-lock.yaml', matrix.workspace) }}
           registry-url: 'https://npm.pkg.github.com'
           scope: '@jplannnou'
 
@@ -136,8 +140,8 @@ jobs:
         with:
           name: build-${{ matrix.workspace }}-${{ github.sha }}
           path: |
-            ${{ inputs.working-directory }}/${{ matrix.workspace }}/dist
-            ${{ inputs.working-directory }}/${{ matrix.workspace }}/build
+            ${{ matrix.workspace }}/dist
+            ${{ matrix.workspace }}/build
           retention-days: 7
           if-no-files-found: ignore
 
