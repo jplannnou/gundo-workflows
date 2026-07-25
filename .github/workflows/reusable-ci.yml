@@ -128,8 +128,13 @@ jobs:
       - name: Test
         if: inputs.run-tests
         run: |
+          # Correr el test script tal cual lo define el repo. El intento previo
+          # de forzar flags ('-- --run --passWithNoTests') rompia jest: pnpm
+          # reenvia el '--' literal y jest toma '--passWithNoTests' como PATRON
+          # de nombre, filtrando los specs a 0 (user-engine-api: 50 suites -> 0).
+          # Repos sin tests caen al else y se saltean.
           if pnpm run | grep -q '^  test'; then
-            pnpm test -- --run --passWithNoTests || pnpm test -- --passWithNoTests
+            pnpm test
           else
             echo "No test script defined; skipping"
           fi
