@@ -441,11 +441,45 @@ jobs:
       - name: Cleanup canary tag (always)
         if: always() && inputs.skip-canary == false && steps.canary-meta.outputs.tag != ''
         run: |
-          gcloud run services update-traffic ${{ inputs.service }} \
-            --region=${{ inputs.gcp-region }} \
-            --project=${{ inputs.gcp-project }} \
-            --remove-tags=${{ steps.canary-meta.outputs.tag }} \
-            --quiet || true
+          TAG="${{ steps.canary-meta.outputs.tag }}"
+
+          tag_is_absent() {
+            local service_json
+            service_json=$(gcloud run services describe ${{ inputs.service }} \
+              --region=${{ inputs.gcp-region }} \
+              --project=${{ inputs.gcp-project }} \
+              --format=json) || return 2
+
+            if jq -e --arg tag "$TAG" \
+              '.spec.traffic[]? | select(.tag == $tag)' \
+              <<< "$service_json" >/dev/null; then
+              return 1
+            fi
+            return 0
+          }
+
+          if tag_is_absent; then
+            echo "Canary tag '$TAG' is already absent"
+            exit 0
+          fi
+
+          for attempt in 1 2 3; do
+            echo "Removing canary tag '$TAG' (attempt $attempt/3)"
+            gcloud run services update-traffic ${{ inputs.service }} \
+              --region=${{ inputs.gcp-region }} \
+              --project=${{ inputs.gcp-project }} \
+              --remove-tags="$TAG" \
+              --quiet || true
+
+            if tag_is_absent; then
+              echo "Verified: canary tag '$TAG' is absent"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+
+          echo "::error::Canary tag '$TAG' is still present after 3 cleanup attempts"
+          exit 1
 
       # Re-bind allUsers/run.invoker at SERVICE level after every
       # `update-traffic` call. The promote step (line ~369) and the cleanup
