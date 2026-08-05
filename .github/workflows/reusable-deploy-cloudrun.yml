@@ -304,12 +304,20 @@ jobs:
           echo "flags-file=$FLAGS_FILE" >> "$GITHUB_OUTPUT"
           echo "Built $(wc -l < "$FLAGS_FILE") deploy flags → $FLAGS_FILE"
 
+      # Compute the tag before invoking gcloud. If `gcloud run deploy` creates
+      # an invalid revision and exits non-zero, outputs written after that
+      # command never exist. The cleanup step then cannot remove the poisoned
+      # tag and every later deploy fails while Cloud Run tries to route it.
+      - name: Prepare canary metadata
+        id: canary-meta
+        if: inputs.skip-canary == false
+        run: echo "tag=canary-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
       - name: Deploy new revision (no traffic)
         id: deploy-new
         if: inputs.skip-canary == false
         run: |
-          SHORT_SHA="${GITHUB_SHA:0:7}"
-          REVISION_TAG="canary-$SHORT_SHA"
+          REVISION_TAG="${{ steps.canary-meta.outputs.tag }}"
 
           # Read flags as array — preserves each token without re-parsing,
           # so values containing |, ||, $, etc. are passed verbatim to gcloud.
@@ -431,12 +439,12 @@ jobs:
       # — success, failure, cancellation — and untags whatever the deploy
       # step created. Idempotent: --remove-tags on a missing tag is a no-op.
       - name: Cleanup canary tag (always)
-        if: always() && steps.deploy-new.outputs.tag != ''
+        if: always() && inputs.skip-canary == false && steps.canary-meta.outputs.tag != ''
         run: |
           gcloud run services update-traffic ${{ inputs.service }} \
             --region=${{ inputs.gcp-region }} \
             --project=${{ inputs.gcp-project }} \
-            --remove-tags=${{ steps.deploy-new.outputs.tag }} \
+            --remove-tags=${{ steps.canary-meta.outputs.tag }} \
             --quiet || true
 
       # Re-bind allUsers/run.invoker at SERVICE level after every
