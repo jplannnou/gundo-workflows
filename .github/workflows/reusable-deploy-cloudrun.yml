@@ -304,12 +304,20 @@ jobs:
           echo "flags-file=$FLAGS_FILE" >> "$GITHUB_OUTPUT"
           echo "Built $(wc -l < "$FLAGS_FILE") deploy flags → $FLAGS_FILE"
 
+      # Compute the tag before invoking gcloud. If `gcloud run deploy` creates
+      # an invalid revision and exits non-zero, outputs written after that
+      # command never exist. The cleanup step then cannot remove the poisoned
+      # tag and every later deploy fails while Cloud Run tries to route it.
+      - name: Prepare canary metadata
+        id: canary-meta
+        if: inputs.skip-canary == false
+        run: echo "tag=canary-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
       - name: Deploy new revision (no traffic)
         id: deploy-new
         if: inputs.skip-canary == false
         run: |
-          SHORT_SHA="${GITHUB_SHA:0:7}"
-          REVISION_TAG="canary-$SHORT_SHA"
+          REVISION_TAG="${{ steps.canary-meta.outputs.tag }}"
 
           # Read flags as array — preserves each token without re-parsing,
           # so values containing |, ||, $, etc. are passed verbatim to gcloud.
@@ -431,13 +439,47 @@ jobs:
       # — success, failure, cancellation — and untags whatever the deploy
       # step created. Idempotent: --remove-tags on a missing tag is a no-op.
       - name: Cleanup canary tag (always)
-        if: always() && steps.deploy-new.outputs.tag != ''
+        if: always() && inputs.skip-canary == false && steps.canary-meta.outputs.tag != ''
         run: |
-          gcloud run services update-traffic ${{ inputs.service }} \
-            --region=${{ inputs.gcp-region }} \
-            --project=${{ inputs.gcp-project }} \
-            --remove-tags=${{ steps.deploy-new.outputs.tag }} \
-            --quiet || true
+          TAG="${{ steps.canary-meta.outputs.tag }}"
+
+          tag_is_absent() {
+            local service_json
+            service_json=$(gcloud run services describe ${{ inputs.service }} \
+              --region=${{ inputs.gcp-region }} \
+              --project=${{ inputs.gcp-project }} \
+              --format=json) || return 2
+
+            if jq -e --arg tag "$TAG" \
+              '.spec.traffic[]? | select(.tag == $tag)' \
+              <<< "$service_json" >/dev/null; then
+              return 1
+            fi
+            return 0
+          }
+
+          if tag_is_absent; then
+            echo "Canary tag '$TAG' is already absent"
+            exit 0
+          fi
+
+          for attempt in 1 2 3; do
+            echo "Removing canary tag '$TAG' (attempt $attempt/3)"
+            gcloud run services update-traffic ${{ inputs.service }} \
+              --region=${{ inputs.gcp-region }} \
+              --project=${{ inputs.gcp-project }} \
+              --remove-tags="$TAG" \
+              --quiet || true
+
+            if tag_is_absent; then
+              echo "Verified: canary tag '$TAG' is absent"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+
+          echo "::error::Canary tag '$TAG' is still present after 3 cleanup attempts"
+          exit 1
 
       # Re-bind allUsers/run.invoker at SERVICE level after every
       # `update-traffic` call. The promote step (line ~369) and the cleanup
