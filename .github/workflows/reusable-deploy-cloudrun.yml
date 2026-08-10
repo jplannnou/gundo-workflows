@@ -115,6 +115,7 @@ permissions:
   contents: read
   id-token: write
   pull-requests: write
+  issues: write # abrir/actualizar un issue "deploy fallido" (aviso ruidoso)
 
 jobs:
   deploy:
@@ -317,6 +318,47 @@ jobs:
             --commit="${{ github.sha }}" \
             --status="${{ steps.outcome.outputs.status }}" \
             --revision="${{ steps.deploy-new.outputs.revision }}"
+
+      # Aviso RUIDOSO cuando el deploy no promueve. El job ya queda en rojo, pero
+      # una X en Actions es fácil de no mirar: así gundo-payments-api sirvió una
+      # revisión vieja durante varias versiones sin que nadie se enterara (el
+      # contenedor nuevo no arrancaba → canary unhealthy → rollback → tráfico
+      # congelado). Aquí se abre (o comenta) un issue en el repo que despliega,
+      # que sí notifica. Nunca hace fallar el deploy por sí mismo (best-effort).
+      - name: Aviso ruidoso si el deploy no promovió
+        if: always() && steps.outcome.outputs.status != 'promoted'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVICE: ${{ inputs.service }}
+          STATUS: ${{ steps.outcome.outputs.status }}
+          REVISION: ${{ steps.deploy-new.outputs.revision }}
+        run: |
+          set -euo pipefail
+          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          TITLE="🔴 Deploy no promovió: ${SERVICE} — el tráfico NO está en la última revisión"
+          BODY=$(cat <<EOF
+          El deploy de \`${SERVICE}\` terminó con estado **${STATUS}**: la revisión nueva no tomó el 100% del tráfico (rollback o fallo). **La versión nueva NO está sirviendo** — producción quedó en la revisión anterior.
+
+          - **Commit:** \`${GITHUB_SHA}\`
+          - **Revisión intentada:** \`${REVISION:-desconocida}\`
+          - **Run:** ${RUN_URL}
+
+          **Qué revisar primero:** logs de arranque de la revisión en Cloud Run (\`Container called exit(1)\`, \`failed to start and listen on PORT\`). Causa típica: el contenedor no bootea aunque \`nest build\`/\`docker build\` pasen (patrón "built ≠ boots"; ver gundo-payments-api #43). Cerrar este issue cuando el deploy vuelva a promover.
+          EOF
+          )
+          # Reutiliza un issue abierto del mismo servicio si existe; si no, lo crea.
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "in:title Deploy no promovió: ${SERVICE}" \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+            echo "Comentado en issue #$EXISTING"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY" \
+              --label deploy-failed 2>/dev/null \
+              || gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+          fi
 
       - name: Fail job if rolled back or failed
         if: steps.outcome.outputs.status != 'promoted'
