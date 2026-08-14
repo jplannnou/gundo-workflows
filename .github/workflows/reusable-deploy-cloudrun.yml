@@ -192,10 +192,24 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
+      # 🔴 En una ruta ESCRIBIBLE por el runner, no en /usr/local/bin.
+      #
+      # En los runners hospedados de GitHub el usuario es sudoer sin contraseña
+      # y escribir ahí funcionaba. En los self-hosted del org —WSL2, desde el
+      # 21-jul— no lo es: `curl -o /usr/local/bin/cosign` devuelve 23 (write
+      # error) y tumba el deploy ENTERO después de haber construido y subido la
+      # imagen. Todos los deploys de gundo-ecommerce-ui fallaron así desde el
+      # 12-ago, y el error real quedaba enterrado bajo un warning de curl.
+      #
+      # $RUNNER_TEMP siempre pertenece al runner, en las dos clases de máquina.
       - name: Install Cosign
         run: |
-          curl -L https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 \
-            -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 \
+            -o "$RUNNER_TEMP/bin/cosign"
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/cosign" version
 
       - name: Login cosign to Artifact Registry
         run: |
