@@ -6,8 +6,8 @@ name: Reusable Cloud Run Deploy (canary + auto-rollback)
 #   1. Deploy new revision with --no-traffic and tag=canary-<sha>
 #   2. Shift 10% traffic to canary
 #   3. Watch SLO (error rate, p95 latency) for `canary-duration` seconds
-#   4. If SLO holds: promote to 100% + tag stable
-#   5. If SLO breaks: rollback to previous stable revision
+#   4. If SLO holds: promote to 100%
+#   5. If SLO breaks: rollback to the revision that was serving pre-deploy
 #
 # Reports deployment lifecycle to Feedback Hub (/api/devops/deployments).
 # ------------------------------------------------------------------------------
@@ -195,6 +195,61 @@ jobs:
             --member=allUsers \
             --role=roles/run.invoker
 
+      # ------------------------------------------------------------------------
+      # OBJETIVO DEL ROLLBACK — se calcula ANTES de desplegar nada.
+      #
+      # Antes esto se resolvía buscando una revisión con la etiqueta
+      # `stable=true`. Esa etiqueta NO EXISTÍA NUNCA. Medido en producción:
+      #
+      #   gcloud run revisions list --project project-genie-ue \
+      #     --region europe-west1 --filter="metadata.labels.stable=true"
+      #   WARNING: The following filter keys were not present in any resource :
+      #            metadata.labels.stable
+      #
+      # Cero revisiones la tenían, en ningún servicio. Motivo de fondo: las
+      # revisiones de Cloud Run son INMUTABLES — la Admin API no expone ningún
+      # método para modificar sus labels, y por eso `gcloud run revisions`
+      # solo tiene `list`, `describe` y `delete`. No hay ningún `update`.
+      # Cualquier intento de etiquetar a posteriori falla con
+      # "Invalid choice: 'update'". Es decir: no era que se nos hubiera
+      # olvidado poner la etiqueta, es que no se puede poner.
+      #
+      # DECISIÓN: no se persiste ninguna marca en GCP. El objetivo del
+      # rollback se captura aquí, en caliente, leyendo qué revisión está
+      # sirviendo justo antes de desplegar. Ventajas frente a la etiqueta:
+      #   - No hay problema de arranque. Con etiquetas, el PRIMER deploy tras
+      #     el cambio no tendría ninguna revisión marcada y el rollback se
+      #     quedaría sin destino. Aquí el primer deploy ya está protegido,
+      #     porque toda revisión que sirve tráfico es un destino válido.
+      #   - "Exactamente una estable por servicio" sale gratis: es un valor
+      #     calculado, no un estado que haya que mantener sincronizado.
+      #   - Refleja la realidad aunque alguien haya movido el tráfico a mano.
+      #
+      # Se elige la revisión con MÁS tráfico, no la que tenga exactamente 100%,
+      # para cubrir el caso de un run anterior abortado a mitad de canary que
+      # dejara el reparto partido (p.ej. 90/10).
+      - name: Capturar revisión que sirve ahora (objetivo del rollback)
+        id: current
+        if: inputs.skip-canary == false
+        run: |
+          set -uo pipefail
+          SERVING=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --format=json 2>/dev/null \
+            | jq -r '[.status.traffic[]? | select((.percent // 0) > 0)]
+                     | max_by(.percent) | .revisionName // empty' || true)
+
+          if [ -z "$SERVING" ]; then
+            # Servicio nuevo: aún no hay nada sirviendo. No es un error aquí —
+            # el deploy sigue. Es el step de Rollback el que decidirá qué hacer
+            # si llega a hacer falta (ver su comentario).
+            echo "::warning::No hay revisión sirviendo tráfico todavía (servicio nuevo). El rollback automático no tendrá destino en este deploy."
+          else
+            echo "::notice::Objetivo de rollback si el canary incumple el SLO: $SERVING"
+          fi
+          echo "revision=$SERVING" >> "$GITHUB_OUTPUT"
+
       - name: Deploy new revision (no traffic)
         id: deploy-new
         if: inputs.skip-canary == false
@@ -205,10 +260,18 @@ jobs:
             --no-traffic \
             --tag=$REVISION_TAG
 
+          # `status.traffic[0]` NO es la revisión recién creada: la lista de
+          # tráfico empieza por las entradas con tag (canarios viejos que
+          # quedaron colgados), así que devolvía una revisión de hace meses.
+          # Medido en genie-api: traffic[0] = genie-api-00912-teg mientras la
+          # revisión nueva era genie-api-01633-fox. Eso hacía que el watch
+          # vigilara una revisión con 0% de tráfico → 0 peticiones → siempre
+          # por debajo de MIN_REQUESTS → el SLO no se comprobaba NUNCA y el
+          # canary no podía fallar. `latestCreatedRevisionName` sí es la nueva.
           REVISION=$(gcloud run services describe ${{ inputs.service }} \
             --region=${{ inputs.gcp-region }} \
             --project=${{ inputs.gcp-project }} \
-            --format='value(status.traffic[0].revisionName)')
+            --format='value(status.latestCreatedRevisionName)')
           echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
           echo "tag=$REVISION_TAG" >> "$GITHUB_OUTPUT"
 
@@ -256,26 +319,34 @@ jobs:
             --project=${{ inputs.gcp-project }} \
             --to-tags=${{ steps.deploy-new.outputs.tag }}=100
 
-          # Label new revision as stable, remove label from prev
-          gcloud run revisions update ${{ steps.deploy-new.outputs.revision }} \
-            --region=${{ inputs.gcp-region }} \
-            --project=${{ inputs.gcp-project }} \
-            --update-labels=stable=true
+          # Aquí NO se etiqueta nada. El intento anterior era
+          # `gcloud run revisions update --update-labels=stable=true`, un
+          # comando que no existe en ninguna pista de gcloud (ni beta ni
+          # alpha), porque las revisiones de Cloud Run son inmutables. Fallaba
+          # siempre; y como el `update-traffic` de arriba ya había corrido, el
+          # tráfico sí se promovía y el fallo solo dejaba el job en rojo.
+          # El objetivo del rollback ya se capturó antes de desplegar.
 
+      # El rollback se dispara cuando el watch sale con código 1, lo que ocurre
+      # EN MEDIO de la ventana de observación (canary-watch.sh aborta en cuanto
+      # acumula 2 ventanas seguidas incumpliendo el SLO), no solo al final. Por
+      # eso el destino se captura antes del deploy: en ese camino la promoción
+      # nunca llega a ejecutarse, así que no puede depender de nada que la
+      # promoción hubiera dejado escrito.
       - name: Rollback
         id: rollback
         if: inputs.skip-canary == false && steps.watch.outcome == 'failure'
         run: |
-          STABLE_REVISION=$(gcloud run revisions list \
-            --service=${{ inputs.service }} \
-            --region=${{ inputs.gcp-region }} \
-            --project=${{ inputs.gcp-project }} \
-            --filter='metadata.labels.stable=true AND NOT metadata.name=${{ steps.deploy-new.outputs.revision }}' \
-            --format='value(metadata.name)' \
-            --limit=1)
+          STABLE_REVISION="${{ steps.current.outputs.revision }}"
 
           if [ -z "$STABLE_REVISION" ]; then
-            echo "::error::No stable revision found for rollback"
+            # Solo alcanzable en el primer deploy absoluto de un servicio, con
+            # el canary ya incumpliendo el SLO. Se falla con un mensaje claro
+            # en vez de caer a "la revisión anterior por orden de creación":
+            # en un servicio recién creado esa revisión nunca sirvió tráfico
+            # (puede venir de un deploy abortado o de otra configuración), así
+            # que mandarle el 100% sería una apuesta a ciegas. Peor que parar.
+            echo "::error::No hay revisión previa a la que volver: este es el primer deploy del servicio y el canary ya incumple el SLO. El tráfico sigue en la revisión nueva. Revisa los logs de arranque y despliega un arreglo, o borra el servicio si nunca llegó a funcionar."
             exit 1
           fi
 
@@ -297,9 +368,14 @@ jobs:
         id: outcome
         if: always()
         run: |
+          # "promoted" se decide por el resultado de la PROMOCIÓN, no por el del
+          # watch. Antes bastaba con que el watch saliera bien: si el
+          # `update-traffic` de la promoción fallaba, el tráfico se quedaba en
+          # el 10% del canary y aun así se reportaba "promoted" (y el aviso
+          # ruidoso no saltaba, porque solo salta si el estado no es promoted).
           if [ "${{ inputs.skip-canary }}" = "true" ]; then
             echo "status=promoted" >> "$GITHUB_OUTPUT"
-          elif [ "${{ steps.watch.outcome }}" = "success" ]; then
+          elif [ "${{ steps.promote.outcome }}" = "success" ]; then
             echo "status=promoted" >> "$GITHUB_OUTPUT"
           elif [ "${{ steps.rollback.outcome }}" = "success" ]; then
             echo "status=rolled_back" >> "$GITHUB_OUTPUT"
