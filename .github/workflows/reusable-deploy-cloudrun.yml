@@ -3,11 +3,14 @@ name: Reusable Cloud Run Deploy (canary + auto-rollback)
 # ------------------------------------------------------------------------------
 # Deploy a signed, SBOM-attested Docker image to Cloud Run with canary
 # strategy:
+#   0. Capture the rollback target: the revision serving the most traffic
+#      right now (see the `Capture rollback target` step for why it must
+#      happen before the deploy, and why no label is written)
 #   1. Deploy new revision with --no-traffic and tag=canary-<sha>
 #   2. Shift 10% traffic to canary
 #   3. Watch SLO (error rate, p95 latency) for `canary-duration` seconds
-#   4. If SLO holds: promote to 100% + tag stable
-#   5. If SLO breaks: rollback to previous stable revision
+#   4. If SLO holds: promote to 100% + untag the canary
+#   5. If SLO breaks: rollback to the revision captured in step 0
 #
 # Reports deployment lifecycle to Feedback Hub (/api/devops/deployments).
 # ------------------------------------------------------------------------------
@@ -249,7 +252,10 @@ jobs:
           # any other shell metacharacter — discovered 2026-05-08 when Engine
           # PR #48 (--set-env-vars=...SELLER_NOTIFICATION_PHONES=p1|p2...) hit
           # exit 127 because bash interpreted `|` as a pipe inside the raw
-          # interpolation `${{ steps.flags.outputs.flags }}`.
+          # interpolation of the old `steps.flags.outputs.flags` output.
+          # (Deliberately written as plain text, not as a GitHub expression:
+          # it is a historical reference to an output that no longer exists,
+          # and actionlint resolves expressions even inside shell comments.)
           FLAGS_FILE="$RUNNER_TEMP/deploy-flags.txt"
           {
             echo "--image=${{ inputs.image }}"
@@ -326,6 +332,68 @@ jobs:
         id: canary-meta
         if: inputs.skip-canary == false
         run: echo "tag=canary-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      # Captura el destino del rollback ANTES de desplegar, leyendo qué
+      # revisión sirve tráfico ahora mismo.
+      #
+      # Antes, el rollback buscaba su destino por `metadata.labels.stable=true`.
+      # Nadie ponía nunca esa etiqueta: la escritura se eliminó en abril
+      # (421d9fde) porque usaba `gcloud run revisions update`, que no es un
+      # subcomando válido — las revisiones de Cloud Run son INMUTABLES y la
+      # Admin API no expone forma de modificar sus labels. Por eso no se
+      # reintroduce la etiqueta: no es un olvido, es imposible por diseño.
+      # Medido en vivo (2026-08-15): cero revisiones la llevan en ningún
+      # servicio, así que el rollback moría con "No stable revision found"
+      # y el tráfico se quedaba en la revisión mala.
+      #
+      # Se captura ANTES del deploy y no en el momento del rollback porque
+      # para entonces el canary ya se está llevando su porcentaje y la foto
+      # está contaminada. Y se captura fuera del step de promoción porque
+      # `canary-watch.sh` aborta con exit 1 A MITAD de la ventana en cuanto
+      # acumula 2 ventanas seguidas fuera de umbral (ver el bloque
+      # MAX_BREACHES del script): en ese camino la promoción nunca llega a
+      # ejecutarse, así que el destino no puede depender de nada que ella
+      # hubiera dejado escrito.
+      #
+      # Se elige la revisión con MÁS tráfico, no la que tenga exactamente
+      # 100%: un run abortado a mitad de canary puede haber dejado el reparto
+      # partido (p. ej. 90/10) y en ese caso el destino correcto es el 90%.
+      # Se excluyen las entradas con tag, que son canarios viejos colgados —
+      # genie-api acumula 11 en vivo, y son justo las primeras de la lista.
+      - name: Capture rollback target
+        id: rollback-target
+        if: inputs.skip-canary == false
+        run: |
+          # Un servicio que aún no existe hace fallar a `describe`. Eso no es
+          # un error: es el primer despliegue absoluto. Se trata como "sin
+          # destino" y se decide más abajo, en el step de Rollback.
+          SERVICE_JSON=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.gcp-region }} \
+            --project=${{ inputs.gcp-project }} \
+            --format=json 2>/dev/null) || SERVICE_JSON=''
+
+          if [ -n "$SERVICE_JSON" ]; then
+            ROLLBACK_TARGET=$(jq -r '
+              [ .status.traffic[]?
+                | select(.tag == null)
+                | select((.percent // 0) > 0)
+              ]
+              | sort_by(.percent)
+              | last
+              | .revisionName // ""
+            ' <<< "$SERVICE_JSON")
+          else
+            ROLLBACK_TARGET=''
+          fi
+
+          if [ -z "$ROLLBACK_TARGET" ] || [ "$ROLLBACK_TARGET" = "null" ]; then
+            ROLLBACK_TARGET=''
+            echo "::warning::Ninguna revisión previa sirve tráfico en '${{ inputs.service }}'. Si el canary rompe el SLO, el rollback no tendrá destino y fallará de forma explícita."
+          else
+            echo "Destino de rollback capturado: $ROLLBACK_TARGET"
+          fi
+
+          echo "revision=$ROLLBACK_TARGET" >> "$GITHUB_OUTPUT"
 
       - name: Deploy new revision (no traffic)
         id: deploy-new
@@ -418,29 +486,33 @@ jobs:
         id: rollback
         if: inputs.skip-canary == false && steps.watch.outcome == 'failure'
         run: |
-          STABLE_REVISION=$(gcloud run revisions list \
-            --service=${{ inputs.service }} \
-            --region=${{ inputs.gcp-region }} \
-            --project=${{ inputs.gcp-project }} \
-            --filter='metadata.labels.stable=true AND NOT metadata.name=${{ steps.deploy-new.outputs.revision }}' \
-            --format='value(metadata.name)' \
-            --limit=1)
+          ROLLBACK_TARGET="${{ steps.rollback-target.outputs.revision }}"
 
-          if [ -z "$STABLE_REVISION" ]; then
-            echo "::error::No stable revision found for rollback"
+          # Primer despliegue de un servicio nuevo que además rompe el SLO:
+          # no hay ninguna revisión previa que haya servido tráfico, así que
+          # no hay destino al que volver. Se falla con un mensaje accionable
+          # en vez de caer a "la revisión anterior por orden de creación":
+          # en un servicio recién creado esa revisión nunca sirvió tráfico
+          # (puede venir de un deploy abortado o de otra configuración), y
+          # mandarle el 100% sería una apuesta a ciegas — peor que parar.
+          # El step de cleanup posterior corre igualmente (`always()`) y
+          # retira el tag del canary, así que no queda tag colgado.
+          if [ -z "$ROLLBACK_TARGET" ]; then
+            echo "::error::El canary rompió el SLO pero no hay revisión previa sirviendo tráfico en '${{ inputs.service }}', así que no hay destino de rollback. Revisa la revisión '${{ steps.deploy-new.outputs.revision }}' a mano y despliega una versión sana."
             exit 1
           fi
 
           gcloud run services update-traffic ${{ inputs.service }} \
             --region=${{ inputs.gcp-region }} \
             --project=${{ inputs.gcp-project }} \
-            --to-revisions=$STABLE_REVISION=100 \
+            --to-revisions="$ROLLBACK_TARGET=100" \
             --remove-tags=${{ steps.deploy-new.outputs.tag }}
 
-          echo "Rolled back to $STABLE_REVISION"
-          echo "stable-revision=$STABLE_REVISION" >> "$GITHUB_OUTPUT"
+          echo "Rolled back to $ROLLBACK_TARGET"
+          echo "rollback-revision=$ROLLBACK_TARGET" >> "$GITHUB_OUTPUT"
 
       - name: Deploy direct (skip canary, emergency)
+        id: deploy-direct
         if: inputs.skip-canary == true
         run: |
           mapfile -t flags < "${{ steps.flags.outputs.flags-file }}"
@@ -522,13 +594,25 @@ jobs:
             --role=roles/run.invoker \
             --quiet
 
+      # `promoted` se decide por el resultado de la PROMOCIÓN, no por el del
+      # watch. Antes se miraba `steps.watch.outcome`: si el watch pasaba pero
+      # el `update-traffic` de la promoción fallaba, el tráfico se quedaba al
+      # `canary-percent` (10%) en la revisión nueva y el deploy se reportaba
+      # igualmente como `promoted` a Feedback Hub, además de saltarse el step
+      # final de fallo — que solo salta si el estado NO es `promoted`. Mismo
+      # razonamiento para el camino `skip-canary`, que reportaba `promoted`
+      # aunque el `gcloud run deploy` directo hubiera fallado.
       - name: Determine outcome
         id: outcome
         if: always()
         run: |
           if [ "${{ inputs.skip-canary }}" = "true" ]; then
-            echo "status=promoted" >> "$GITHUB_OUTPUT"
-          elif [ "${{ steps.watch.outcome }}" = "success" ]; then
+            if [ "${{ steps.deploy-direct.outcome }}" = "success" ]; then
+              echo "status=promoted" >> "$GITHUB_OUTPUT"
+            else
+              echo "status=failed" >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "${{ steps.promote.outcome }}" = "success" ]; then
             echo "status=promoted" >> "$GITHUB_OUTPUT"
           elif [ "${{ steps.rollback.outcome }}" = "success" ]; then
             echo "status=rolled_back" >> "$GITHUB_OUTPUT"
