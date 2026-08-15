@@ -619,41 +619,6 @@ jobs:
           else
             echo "status=failed" >> "$GITHUB_OUTPUT"
           fi
-
-        if: always() && steps.outcome.outputs.status != 'promoted'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SERVICE: ${{ inputs.service }}
-          STATUS: ${{ steps.outcome.outputs.status }}
-          REVISION: ${{ steps.deploy-new.outputs.revision }}
-        run: |
-          set -euo pipefail
-          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          TITLE="🔴 Deploy no promovió: ${SERVICE} — el tráfico NO está en la última revisión"
-          BODY=$(cat <<EOF
-          El deploy de \`${SERVICE}\` terminó con estado **${STATUS}**: la revisión nueva no tomó el 100% del tráfico (rollback o fallo). **La versión nueva NO está sirviendo** — producción quedó en la revisión anterior.
-
-          - **Commit:** \`${GITHUB_SHA}\`
-          - **Revisión intentada:** \`${REVISION:-desconocida}\`
-          - **Run:** ${RUN_URL}
-
-          **Qué revisar primero:** logs de arranque de la revisión en Cloud Run (\`Container called exit(1)\`, \`failed to start and listen on PORT\`). Causa típica: el contenedor no bootea aunque \`nest build\`/\`docker build\` pasen (patrón "built ≠ boots"; ver gundo-payments-api #43). Cerrar este issue cuando el deploy vuelva a promover.
-          EOF
-          )
-          # Reutiliza un issue abierto del mismo servicio si existe; si no, lo crea.
-          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-            --search "in:title Deploy no promovió: ${SERVICE}" \
-            --json number --jq '.[0].number // empty' 2>/dev/null || true)
-          if [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
-            echo "Comentado en issue #$EXISTING"
-          else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY" \
-              --label deploy-failed 2>/dev/null \
-              || gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
-          fi
-
       - name: Report final status
         if: always()
         env:
