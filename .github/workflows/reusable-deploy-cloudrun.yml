@@ -170,6 +170,13 @@ permissions:
   contents: read
   id-token: write
   pull-requests: write
+  # Para abrir/actualizar el issue "deploy no promovió" (aviso ruidoso) en el
+  # repo que despliega. Un workflow reusable NO puede pedir más permisos de los
+  # que le concede el caller: si un `deploy.yml` consumidor no declara
+  # `issues: write` en SU bloque `permissions`, el run se rechaza antes de
+  # arrancar y ese repo se queda sin desplegar. Los 5 callers actuales ya lo
+  # conceden; cualquier caller nuevo debe concederlo también.
+  issues: write
 
 jobs:
   deploy:
@@ -686,6 +693,64 @@ jobs:
             --commit="${{ github.sha }}" \
             --status="${{ steps.outcome.outputs.status }}" \
             --revision="${{ steps.deploy-new.outputs.revision }}"
+
+      # Aviso RUIDOSO cuando el deploy no promueve. El job ya queda en rojo, pero
+      # una X en Actions es fácil de no mirar: así gundo-payments-api sirvió una
+      # revisión vieja durante varias versiones sin que nadie se enterara (el
+      # contenedor nuevo no arrancaba → canary unhealthy → rollback → tráfico
+      # congelado). Aquí se abre (o comenta) un issue en el repo que despliega,
+      # que sí notifica. Nunca hace fallar el deploy por sí mismo (best-effort).
+      #
+      # Va ANTES del step que tumba el job a propósito: aquel acaba en `exit 1` y,
+      # sin `if: always()`, nada posterior llegaría a ejecutarse.
+      - name: Aviso ruidoso si el deploy no promovió
+        if: always() && steps.outcome.outputs.status != 'promoted'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVICE: ${{ inputs.service }}
+          STATUS: ${{ steps.outcome.outputs.status }}
+          REVISION: ${{ steps.deploy-new.outputs.revision }}
+          # Capturado ANTES de desplegar por `Capture rollback target`: es la
+          # revisión en la que quedó (o debía quedar) el tráfico. Vacío en el
+          # camino `skip-canary`, que no pasa por ese step.
+          SERVING: ${{ steps.rollback-target.outputs.revision }}
+          GCP_PROJECT: ${{ inputs.gcp-project }}
+          GCP_REGION: ${{ inputs.gcp-region }}
+        run: |
+          set -euo pipefail
+          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          TITLE="🔴 Deploy no promovió: ${SERVICE} — el tráfico NO está en la última revisión"
+          BODY=$(cat <<EOF
+          El deploy de \`${SERVICE}\` terminó con estado **${STATUS}**: la revisión nueva no tomó el 100% del tráfico (rollback o fallo). **La versión nueva NO está sirviendo** — producción quedó en la revisión anterior.
+
+          - **Commit:** \`${GITHUB_SHA}\`
+          - **Revisión intentada:** \`${REVISION:-desconocida}\`
+          - **Revisión que sirve el tráfico:** \`${SERVING:-desconocida}\`
+          - **Run:** ${RUN_URL}
+
+          **Qué revisar primero:** logs de arranque de la revisión en Cloud Run (\`Container called exit(1)\`, \`failed to start and listen on PORT\`). Causa típica: el contenedor no bootea aunque \`nest build\`/\`docker build\` pasen (patrón "built ≠ boots"; ver gundo-payments-api #43).
+
+          \`\`\`sh
+          gcloud run services describe ${SERVICE} --region=${GCP_REGION} --project=${GCP_PROJECT} --format='value(status.traffic)'
+          gcloud run revisions logs read ${REVISION:-REVISION} --region=${GCP_REGION} --project=${GCP_PROJECT} --limit=100
+          \`\`\`
+
+          Cerrar este issue cuando el deploy vuelva a promover.
+          EOF
+          )
+          # Reutiliza un issue abierto del mismo servicio si existe; si no, lo crea.
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "in:title Deploy no promovió: ${SERVICE}" \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+            echo "Comentado en issue #$EXISTING"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY" \
+              --label deploy-failed 2>/dev/null \
+              || gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+          fi
 
       - name: Fail job if rolled back or failed
         if: steps.outcome.outputs.status != 'promoted'
