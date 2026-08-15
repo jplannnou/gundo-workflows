@@ -169,7 +169,6 @@ permissions:
   contents: read
   id-token: write
   pull-requests: write
-  issues: write # abrir/actualizar un issue "deploy fallido" (aviso ruidoso)
 
 jobs:
   deploy:
