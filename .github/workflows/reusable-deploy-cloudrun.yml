@@ -3,9 +3,10 @@ name: Reusable Cloud Run Deploy (canary + auto-rollback)
 # ------------------------------------------------------------------------------
 # Deploy a signed, SBOM-attested Docker image to Cloud Run with canary
 # strategy:
-#   0. Capture the rollback target: the revision serving the most traffic
-#      right now (see the `Capture rollback target` step for why it must
-#      happen before the deploy, and why no label is written)
+#   0. Sweep orphan canary-* tags left by earlier runs, then capture the
+#      rollback target: the revision serving the most traffic right now
+#      (see the `Capture rollback target` step for why it must happen
+#      before the deploy, and why no label is written)
 #   1. Deploy new revision with --no-traffic and tag=canary-<sha>
 #   2. Shift 10% traffic to canary
 #   3. Watch SLO (error rate, p95 latency) for `canary-duration` seconds
@@ -333,6 +334,49 @@ jobs:
         if: inputs.skip-canary == false
         run: echo "tag=canary-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
+      # Barrido de tags `canary-*` HUÉRFANOS que dejaron runs ANTERIORES.
+      #
+      # Toda la limpieza previa de este workflow es AUTOLIMPIEZA: la promoción,
+      # el rollback y el step `Cleanup canary tag (always)` retiran únicamente
+      # el `canary-<sha>` de SU propio run. Eso cubre los finales ordenados,
+      # pero hay caminos en los que el job deja de existir sin ejecutar nada,
+      # ni siquiera los `always()`: el runner self-hosted se apaga o reinicia
+      # (los `gundo-local` viven en una workstation), o el job se cancela por
+      # timeout mientras `gcloud run deploy` está bloqueado esperando al plano
+      # de control.
+      #
+      # Ese último caso no es teórico: las 11 revisiones huérfanas de genie-api
+      # del 10-11 de julio de 2026 tardaron entre 3h30m y 9h52m en aprovisionar
+      # (`Deploying revision succeeded in 9h52m14.38s`). El tag ya estaba
+      # escrito en `spec.traffic` desde el primer segundo; el job murió mucho
+      # antes de poder retirarlo.
+      #
+      # Y como ningún run miraba nunca los tags de otros runs, un solo escape
+      # se volvía permanente. Con este barrido, un escape se cura en el
+      # despliegue siguiente. El script solo retira tags al 0% de tráfico y con
+      # más de 60 minutos de vida, así que nunca puede tocar un canary en
+      # vuelo. Nunca hace fallar el deploy: es higiene, no una puerta.
+      #
+      # Se hace ANTES de crear el tag de este run, y a propósito NO se pasa
+      # `--keep-tag`: si un intento anterior del MISMO sha dejó su tag colgado,
+      # queremos retirarlo antes de volver a crearlo, no conservarlo.
+      #
+      # También corre en el camino `skip-canary`: un deploy de emergencia es
+      # justo cuando más conviene no arrastrar basura en la tabla de tráfico.
+      #
+      # El `--remove-tags` que hace el script se lleva por delante el binding
+      # público, igual que el resto de llamadas a `update-traffic`. Lo recoge
+      # el step `Re-bind public access (always, post-update-traffic)` del final.
+      - name: Sweep orphan canary tags
+        continue-on-error: true
+        run: |
+          bash .gundo-workflows/scripts/sweep-canary-tags.sh \
+            --service="${{ inputs.service }}" \
+            --project="${{ inputs.gcp-project }}" \
+            --region="${{ inputs.gcp-region }}" \
+            --min-age-minutes=60 \
+            --apply
+
       # Captura el destino del rollback ANTES de desplegar, leyendo qué
       # revisión sirve tráfico ahora mismo.
       #
@@ -395,9 +439,21 @@ jobs:
 
           echo "revision=$ROLLBACK_TARGET" >> "$GITHUB_OUTPUT"
 
+      # `timeout-minutes` acota el bloqueo del plano de control. `gcloud run
+      # deploy` espera a que la revisión esté lista y no tiene tope propio: el
+      # 10-11 de julio de 2026 se quedó esperando entre 3h30m y 9h52m por
+      # revisión en europe-west1, y el job se agotó ahí dentro con el tag ya
+      # escrito en `spec.traffic`. Un despliegue sano tarda 1-4 minutos.
+      #
+      # Cortar aquí a los 30 no cancela la operación del lado de Cloud Run —la
+      # revisión acabará estando lista igualmente— pero devuelve el control al
+      # job MIENTRAS EL RUNNER SIGUE VIVO, que es la condición para que el step
+      # `Cleanup canary tag (always)` llegue a ejecutarse. Si aun así la
+      # limpieza no lo consigue, el barrido del próximo despliegue lo recoge.
       - name: Deploy new revision (no traffic)
         id: deploy-new
         if: inputs.skip-canary == false
+        timeout-minutes: 30
         run: |
           REVISION_TAG="${{ steps.canary-meta.outputs.tag }}"
 
