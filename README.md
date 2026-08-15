@@ -17,6 +17,7 @@ Reusable GitHub Actions workflows and templates for the Gundo platform. One plac
 | `scripts/canary-watch.sh` | Cloud Monitoring SLO watcher for canary rollouts |
 | `scripts/report-deployment.sh` | POSTs lifecycle events to Feedback Hub DevOps endpoint |
 | `scripts/cleanup-pr-tags.sh` | Removes `pr-<n>` Cloud Run tags when a PR closes |
+| `scripts/sweep-canary-tags.sh` | Sweeps orphan `canary-*` tags left by earlier runs (dry-run by default) |
 | `docs/ONBOARDING.md` | Step-by-step guide for adopting these workflows in a new repo |
 | `docs/ADR/` | Architecture Decision Records |
 
