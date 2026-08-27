@@ -29,12 +29,14 @@ Si el proyecto se reutiliza, se desarchiva y pasa por escaneo, actualizacion y v
 
 ## Dry-run medido el 27 de agosto de 2026
 
-GitHub devolvio 48 repositorios privados sin archivar y 34 archivados entre `Gundo-Health-and-Food` y `jplannnou`.
+GitHub devolvio inicialmente 48 repositorios privados sin archivar y 34 archivados entre `Gundo-Health-and-Food` y `jplannnou`.
 
-### Archivo de GitHub listo tras cierre administrativo
+### Archivados tras el dry-run
 
-- `Gundo-Health-and-Food/vtex`: solo contiene `.gitignore`; sin codigo, issues, consumidores ni runtime detectado. Cerrar PR #4 antes de archivar.
-- `Gundo-Health-and-Food/gundo-client-analytics`: solo contiene `.gitignore` y el caller de seguridad; sin codigo, issues, PR, consumidores ni runtime detectado.
+- `Gundo-Health-and-Food/vtex`: PR #4 cerrado y repositorio archivado el 27 de agosto de 2026.
+- `Gundo-Health-and-Food/gundo-client-analytics`: repositorio archivado el 27 de agosto de 2026.
+
+Inventario posterior verificado: 46 repositorios sin archivar y 36 archivados.
 
 ### Runtime listo para retirada tras confirmacion destructiva
 
