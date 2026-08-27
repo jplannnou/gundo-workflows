@@ -34,6 +34,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
   id-token: write
   pull-requests: write
 
@@ -99,7 +100,7 @@ jobs:
       runner-label: gundo-local
 ```
 
-The reusable workflow always adds the `self-hosted` label, does not upload private SARIF, and uses no paid security service. Trivy gates critical dependency and configuration findings plus secrets in current files; the open-source Gitleaks CLI scans Git history. Tool releases and third-party actions are versioned and checksum/SHA verified.
+The reusable workflow always adds the `self-hosted` label, does not upload private SARIF, and uses no paid security service. Trivy gates critical dependency and configuration findings plus secrets in current files; the open-source Gitleaks CLI scans Git history. A failed scan creates or updates one repository issue, then leaves the check red. Tool releases and third-party actions are versioned and checksum/SHA verified.
 
 ## Versioning
 

@@ -18,9 +18,14 @@ on:
         description: "Run synthetic detection tests before scanning the repository"
         type: boolean
         default: false
+      notify-on-failure:
+        description: "Create or update one repository issue when a scan fails"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   scan:
@@ -150,6 +155,8 @@ jobs:
           echo 'Both scanners detected the synthetic fixture.'
 
       - name: Scan dependencies and configuration
+        id: dependencies
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -171,6 +178,8 @@ jobs:
             .
 
       - name: Scan current files for secrets
+        id: current-secrets
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -187,6 +196,8 @@ jobs:
             .
 
       - name: Scan Git history for secrets
+        id: history-secrets
+        continue-on-error: true
         shell: bash
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -204,3 +215,69 @@ jobs:
           fi
 
           gitleaks git --redact --no-banner --exit-code 1 --log-opts="$log_opts" .
+
+      - name: Create or update the security incident
+        if: >-
+          always() && inputs.notify-on-failure &&
+          (steps.dependencies.outcome == 'failure' ||
+          steps.current-secrets.outcome == 'failure' ||
+          steps.history-secrets.outcome == 'failure')
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const outcomes = {
+              'Dependencias o configuración': '${{ steps.dependencies.outcome }}',
+              'Secretos en archivos actuales': '${{ steps.current-secrets.outcome }}',
+              'Secretos en el historial Git': '${{ steps.history-secrets.outcome }}',
+            };
+            const failures = Object.entries(outcomes)
+              .filter(([, outcome]) => outcome === 'failure')
+              .map(([name]) => `- ${name}`);
+            const title = '🔴 Seguridad privada: escaneo local fallido';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              'La guarda local de seguridad detectó un problema en:',
+              '',
+              ...failures,
+              '',
+              `Ejecución: ${runUrl}`,
+              '',
+              'El informe detallado está redactado en los logs del run. Esta incidencia se actualiza en vez de duplicarse.',
+            ].join('\n');
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => !issue.pull_request && issue.title === title);
+
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+              core.info(`Actualizada la incidencia #${existing.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+              core.info(`Creada la incidencia #${created.data.number}`);
+            }
+
+      - name: Fail when a scanner found a problem
+        if: >-
+          always() &&
+          (steps.dependencies.outcome == 'failure' ||
+          steps.current-secrets.outcome == 'failure' ||
+          steps.history-secrets.outcome == 'failure')
+        shell: bash
+        run: |
+          echo '::error::The private security scan found a blocking issue. Review the failed scanner step and repository incident.'
+          exit 1
