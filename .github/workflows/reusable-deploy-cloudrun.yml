@@ -160,7 +160,7 @@ on:
       feedback-hub-url:
         description: 'Base URL of Feedback Hub API'
         type: string
-        default: 'https://gundo-content-engine-xlpp333cua-uc.a.run.app'
+        default: 'https://gundo-feedback-api-744494884826.us-central1.run.app'
     secrets:
       FEEDBACK_HUB_API_KEY:
         description: 'API key for Feedback Hub /api/devops endpoints'
@@ -201,7 +201,7 @@ jobs:
           token_format: access_token
 
       - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@v3
 
       # 🔴 En una ruta ESCRIBIBLE por el runner, no en /usr/local/bin.
       #
