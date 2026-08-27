@@ -1,0 +1,206 @@
+name: Reusable private security
+
+# Free security gate for private repositories. The runner is structurally
+# constrained to self-hosted; callers only choose the local fleet label.
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        description: "Local runner fleet label: gundo-local or jp-local"
+        type: string
+        required: true
+      vulnerability-severity:
+        description: "Trivy vulnerability and misconfiguration gate"
+        type: string
+        default: "CRITICAL"
+      self-test:
+        description: "Run synthetic detection tests before scanning the repository"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Dependencies, configuration and secrets
+    runs-on: [self-hosted, "${{ inputs.runner-label }}"]
+    timeout-minutes: 30
+    concurrency:
+      group: private-security-${{ inputs.runner-label }}
+      cancel-in-progress: false
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      TRIVY_VERSION: "v0.74.0"
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: false
+
+      - name: Install verified Gitleaks CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${RUNNER_OS}/${RUNNER_ARCH}" in
+            Linux/X64) asset="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" ;;
+            Linux/ARM64) asset="gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz" ;;
+            macOS/X64) asset="gitleaks_${GITLEAKS_VERSION}_darwin_x64.tar.gz" ;;
+            macOS/ARM64) asset="gitleaks_${GITLEAKS_VERSION}_darwin_arm64.tar.gz" ;;
+            Windows/X64) asset="gitleaks_${GITLEAKS_VERSION}_windows_x64.zip" ;;
+            Windows/ARM64) asset="gitleaks_${GITLEAKS_VERSION}_windows_arm64.zip" ;;
+            *) echo "::error::Unsupported runner ${RUNNER_OS}/${RUNNER_ARCH}"; exit 1 ;;
+          esac
+
+          tool_root="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gundo-gitleaks/${GITLEAKS_VERSION}"
+          binary="${tool_root}/gitleaks"
+          [[ "$RUNNER_OS" == 'Windows' ]] && binary="${binary}.exe"
+
+          if [[ ! -f "$binary" ]]; then
+            download_dir="${RUNNER_TEMP}/gitleaks-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            mkdir -p "$download_dir" "$tool_root"
+            base_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+            curl --fail --silent --show-error --location "$base_url/$asset" --output "$download_dir/$asset"
+            curl --fail --silent --show-error --location \
+              "$base_url/gitleaks_${GITLEAKS_VERSION}_checksums.txt" \
+              --output "$download_dir/checksums.txt"
+
+            expected="$(awk -v file="$asset" '$2 == file { print $1 }' "$download_dir/checksums.txt")"
+            if command -v sha256sum >/dev/null 2>&1; then
+              actual="$(sha256sum "$download_dir/$asset" | awk '{ print $1 }')"
+            elif command -v shasum >/dev/null 2>&1; then
+              actual="$(shasum -a 256 "$download_dir/$asset" | awk '{ print $1 }')"
+            else
+              echo '::error::No SHA-256 utility is available on the runner'
+              exit 1
+            fi
+            if [[ -z "$expected" || "$actual" != "$expected" ]]; then
+              echo '::error::Gitleaks checksum verification failed'
+              exit 1
+            fi
+
+            if [[ "$asset" == *.zip ]] && command -v unzip >/dev/null 2>&1; then
+              unzip -q "$download_dir/$asset" -d "$tool_root"
+            else
+              tar -xf "$download_dir/$asset" -C "$tool_root" gitleaks
+            fi
+            chmod +x "$binary"
+          fi
+
+          "$binary" version
+          echo "$tool_root" >> "$GITHUB_PATH"
+
+      - name: Prove both scanners detect a synthetic secret
+        if: inputs.self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fixture="${RUNNER_TEMP}/gundo-security-self-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$fixture/repo"
+          printf '%s\n' \
+            'rules:' \
+            '  - id: gundo-self-test' \
+            '    category: test' \
+            '    title: GUNDO synthetic secret' \
+            '    severity: CRITICAL' \
+            '    regex: GUNDO_SYNTHETIC_SECRET=[A-Z0-9]{32}' \
+            > "$fixture/trivy-secret.yaml"
+          printf '%s\n' \
+            'title = "GUNDO self-test"' \
+            '[[rules]]' \
+            'id = "gundo-self-test"' \
+            'description = "GUNDO synthetic secret"' \
+            'regex = "GUNDO_SYNTHETIC_SECRET=[A-Z0-9]{32}"' \
+            > "$fixture/gitleaks.toml"
+          printf '%s\n' 'GUNDO_SYNTHETIC_SECRET=ABCDEFGHIJKLMNOPQRSTUVWXYZ123456' > "$fixture/repo/fixture.env"
+
+          trivy fs \
+            --scanners secret \
+            --secret-config "$fixture/trivy-secret.yaml" \
+            --format json \
+            --output "$fixture/trivy.json" \
+            "$fixture/repo"
+          trivy_hits="$(jq '[.Results[]?.Secrets[]? | select(.RuleID == "gundo-self-test")] | length' "$fixture/trivy.json")"
+          [[ "$trivy_hits" -ge 1 ]] || { echo '::error::Trivy did not detect the synthetic secret'; exit 1; }
+
+          git -C "$fixture/repo" init --quiet
+          git -C "$fixture/repo" config user.name 'GUNDO security self-test'
+          git -C "$fixture/repo" config user.email 'security-self-test@gundo.test'
+          git -C "$fixture/repo" add fixture.env
+          git -C "$fixture/repo" commit --quiet -m 'synthetic secret fixture'
+          gitleaks git \
+            --config "$fixture/gitleaks.toml" \
+            --report-format json \
+            --report-path "$fixture/gitleaks.json" \
+            --exit-code 0 \
+            "$fixture/repo"
+          gitleaks_hits="$(jq '[.[] | select(.RuleID == "gundo-self-test")] | length' "$fixture/gitleaks.json")"
+          [[ "$gitleaks_hits" -ge 1 ]] || { echo '::error::Gitleaks did not detect the synthetic secret'; exit 1; }
+
+          echo 'Both scanners detected the synthetic fixture.'
+
+      - name: Scan dependencies and configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_dir="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gundo-trivy-cache"
+          mkdir -p "$cache_dir"
+          trivy fs \
+            --cache-dir "$cache_dir" \
+            --scanners vuln,misconfig \
+            --severity '${{ inputs.vulnerability-severity }}' \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            --skip-dirs .git \
+            --skip-dirs node_modules \
+            --skip-dirs dist \
+            --skip-dirs build \
+            --skip-dirs coverage \
+            --skip-dirs .next \
+            .
+
+      - name: Scan current files for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy fs \
+            --scanners secret \
+            --exit-code 1 \
+            --no-progress \
+            --skip-dirs .git \
+            --skip-dirs node_modules \
+            --skip-dirs dist \
+            --skip-dirs build \
+            --skip-dirs coverage \
+            --skip-dirs .next \
+            .
+
+      - name: Scan Git history for secrets
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == 'pull_request' && -n "$PR_BASE_SHA" && -n "$PR_HEAD_SHA" ]]; then
+            log_opts="${PR_BASE_SHA}..${PR_HEAD_SHA}"
+          elif [[ "$GITHUB_EVENT_NAME" == 'push' && -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            log_opts="${PUSH_BEFORE_SHA}..${GITHUB_SHA}"
+          else
+            log_opts='--all'
+          fi
+
+          gitleaks git --redact --no-banner --exit-code 1 --log-opts="$log_opts" .

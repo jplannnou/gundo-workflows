@@ -7,6 +7,7 @@ Reusable GitHub Actions workflows and templates for the Gundo platform. One plac
 | Path | Purpose |
 |---|---|
 | `.github/workflows/reusable-ci.yml` | Lint + typecheck + build + tests + Trivy scan for any pnpm monorepo |
+| `.github/workflows/reusable-private-security.yml` | Free private-repo gate: Trivy + Gitleaks on self-hosted runners only |
 | `.github/workflows/reusable-build-sign.yml` | Build Docker image → push to Artifact Registry → Cosign sign → SPDX SBOM |
 | `.github/workflows/reusable-deploy-cloudrun.yml` | Canary deploy to Cloud Run with SLO-watched auto-rollback |
 | `.github/workflows/reusable-deploy-firebase.yml` | Firebase Hosting deploy using WIF (no JSON keys) |
@@ -72,6 +73,33 @@ jobs:
 ```
 
 See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the full setup (WIF provider, IAM bindings, secrets, etc.).
+
+## Free security gate for private repositories
+
+Private repositories call the dedicated workflow from their own scheduled or pull-request workflow. Organization repositories pass `gundo-local`; private personal repositories pass `jp-local`.
+
+```yaml
+name: Private security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    uses: jplannnou/gundo-workflows/.github/workflows/reusable-private-security.yml@v1
+    with:
+      runner-label: gundo-local
+```
+
+The reusable workflow always adds the `self-hosted` label, does not upload private SARIF, and uses no paid security service. Trivy gates critical dependency and configuration findings plus secrets in current files; the open-source Gitleaks CLI scans Git history. Tool releases and third-party actions are versioned and checksum/SHA verified.
 
 ## Versioning
 

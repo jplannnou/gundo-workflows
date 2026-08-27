@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly WORKFLOW='.github/workflows/reusable-deploy-cloudrun.yml'
+readonly PRIVATE_SECURITY_WORKFLOW="${PRIVATE_SECURITY_WORKFLOW:-.github/workflows/reusable-private-security.yml}"
 readonly FEEDBACK_HUB_URL='https://gundo-feedback-api-744494884826.us-central1.run.app'
 readonly RETIRED_FEEDBACK_HUB_URL='https://gundo-content-engine-xlpp333cua-uc.a.run.app'
 
@@ -21,5 +22,34 @@ if [[ -n "$legacy_google_actions" ]]; then
   echo '::error::Google GitHub Actions must use a Node 24-compatible major'
   exit 1
 fi
+
+private_security_source="$(< "$PRIVATE_SECURITY_WORKFLOW")"
+
+if ! grep -Fq 'runs-on: [self-hosted, "${{ inputs.runner-label }}"]' <<< "$private_security_source"; then
+  echo "::error file=$PRIVATE_SECURITY_WORKFLOW::Private scans must always require a self-hosted runner"
+  exit 1
+fi
+
+if grep -En 'runs-on:.*(ubuntu|windows|macos)-' <<< "$private_security_source"; then
+  echo "::error file=$PRIVATE_SECURITY_WORKFLOW::Private scans must not use GitHub-hosted runners"
+  exit 1
+fi
+
+if grep -En '(security-events:|upload-sarif|codeql-action)' <<< "$private_security_source"; then
+  echo "::error file=$PRIVATE_SECURITY_WORKFLOW::Private scans must not depend on paid GHAS/SARIF upload"
+  exit 1
+fi
+
+if grep -En 'uses: [^ ]+@(master|main|v[0-9]+([.]|$))' <<< "$private_security_source"; then
+  echo "::error file=$PRIVATE_SECURITY_WORKFLOW::Third-party actions must be pinned to a full commit SHA"
+  exit 1
+fi
+
+for contract in 'fetch-depth: 0' 'trivy fs' 'gitleaks git' 'GUNDO_SYNTHETIC_SECRET'; do
+  if ! grep -Fq "$contract" <<< "$private_security_source"; then
+    echo "::error file=$PRIVATE_SECURITY_WORKFLOW::Missing private security contract: $contract"
+    exit 1
+  fi
+done
 
 echo 'Workflow contracts are current.'
