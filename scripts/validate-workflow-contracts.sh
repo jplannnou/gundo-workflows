@@ -45,8 +45,8 @@ if grep -En 'uses: [^ ]+@(master|main|v[0-9]+([.]|$))' <<< "$private_security_so
   exit 1
 fi
 
-for contract in 'fetch-depth: 0' 'trivy fs' 'gitleaks git' 'GUNDO_SYNTHETIC_SECRET' 'issues: write' 'escaneo local fallido'; do
-  if ! grep -Fq "$contract" <<< "$private_security_source"; then
+for contract in 'fetch-depth: 0' 'trivy fs' '--include-dev-deps' 'gitleaks git' 'GUNDO_SYNTHETIC_SECRET' 'issues: write' 'escaneo local fallido'; do
+  if ! grep -Fq -- "$contract" <<< "$private_security_source"; then
     echo "::error file=$PRIVATE_SECURITY_WORKFLOW::Missing private security contract: $contract"
     exit 1
   fi
