@@ -120,7 +120,7 @@ jobs:
           token_format: access_token
 
       - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@v3
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools@latest
