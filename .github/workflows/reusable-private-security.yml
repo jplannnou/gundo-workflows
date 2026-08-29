@@ -156,19 +156,27 @@ jobs:
           # shell. Semgrep rates this ERROR / HIGH confidence, so it exercises the
           # exact severity AND confidence path the real gate uses. A fixture that
           # only tripped a LOW-confidence rule would prove nothing about the gate.
-          # The runner label is assembled at run time on purpose: this repository's
-          # own contract validator rejects the literal name of a GitHub-hosted
-          # runner anywhere in this file, and it is right to.
-          cat > "$fixture/.github/workflows/fixture.yml" <<FIXTURE
-          name: fixture
-          on: [issues]
-          jobs:
-            demo:
-              runs-on: self-hosted
-              steps:
-                - run: echo "\${{ github.event.issue.title }}"
-          FIXTURE
-          sed -i 's/^          //' "$fixture/.github/workflows/fixture.yml"
+          # Both marker strings are assembled at run time, and neither can be
+          # written literally here -- not even inside this comment:
+          #   - Actions expands an expression delimiter inside a run block before
+          #     bash ever sees it, and it does so in comments too. Writing one
+          #     literally either strips the injection out of the fixture or fails
+          #     to parse the workflow outright.
+          #   - This repository's contract validator rejects the literal name of a
+          #     GitHub-hosted runner anywhere in this file, and it is right to.
+          dollar='$'
+          printf '%s\n' \
+            'name: fixture' \
+            'on: [issues]' \
+            'jobs:' \
+            '  demo:' \
+            '    runs-on: self-hosted' \
+            '    steps:' \
+            "      - run: echo \"${dollar}{{ github.event.issue.title }}\"" \
+            > "$fixture/.github/workflows/fixture.yml"
+
+          grep -q 'github.event.issue.title' "$fixture/.github/workflows/fixture.yml" \
+            || { echo '::error::The self-test fixture lost its injection marker'; exit 1; }
 
           semgrep scan --metrics=off --config p/default \
             --json --output "$fixture/report.json" "$fixture" || true
