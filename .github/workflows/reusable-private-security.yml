@@ -14,6 +14,22 @@ on:
         description: "Trivy vulnerability and misconfiguration gate"
         type: string
         default: "CRITICAL"
+      sast:
+        description: "Run Semgrep OSS static analysis over the source tree"
+        type: boolean
+        default: true
+      sast-severity:
+        description: "Lowest Semgrep severity that fails the build: ERROR, WARNING or INFO"
+        type: string
+        default: "ERROR"
+      sast-min-confidence:
+        description: >-
+          Lowest Semgrep rule confidence that fails the build: HIGH, MEDIUM or LOW.
+          Semgrep OSS has no interprocedural taint analysis, so its LOW-confidence
+          "detect-*" rules fire on any call shape regardless of whether the input is
+          reachable from a user. They are reported but not blocking by default.
+        type: string
+        default: "MEDIUM"
       self-test:
         description: "Run synthetic detection tests before scanning the repository"
         type: boolean
@@ -38,6 +54,10 @@ jobs:
     env:
       GITLEAKS_VERSION: "8.30.1"
       TRIVY_VERSION: "v0.74.0"
+      SEMGREP_VERSION: "1.175.0"
+      # Semgrep phones home unless both of these are set. Neither the source nor
+      # the findings ever leave the runner; only the ruleset name is requested.
+      SEMGREP_SEND_METRICS: "off"
     steps:
       - name: Check out full history
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -103,6 +123,72 @@ jobs:
 
           "$binary" version
           echo "$tool_root" >> "$GITHUB_PATH"
+
+      - name: Install pinned Semgrep OSS
+        if: inputs.sast
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Kept in a versioned venv under the tool cache so repeated runs on the
+          # same self-hosted runner reuse it instead of reinstalling every time.
+          venv_root="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gundo-semgrep/${SEMGREP_VERSION}"
+          if [[ ! -x "$venv_root/bin/semgrep" ]]; then
+            rm -rf "$venv_root"
+            python3 -m venv "$venv_root"
+            "$venv_root/bin/pip" install --quiet --disable-pip-version-check \
+              "semgrep==${SEMGREP_VERSION}"
+          fi
+
+          "$venv_root/bin/semgrep" --version
+          echo "$venv_root/bin" >> "$GITHUB_PATH"
+
+      - name: Prove Semgrep detects a synthetic vulnerability
+        if: inputs.sast && inputs.self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fixture="${RUNNER_TEMP}/gundo-sast-self-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$fixture/.github/workflows"
+
+          # Deliberately vulnerable: interpolating an issue title straight into a
+          # shell. Semgrep rates this ERROR / HIGH confidence, so it exercises the
+          # exact severity AND confidence path the real gate uses. A fixture that
+          # only tripped a LOW-confidence rule would prove nothing about the gate.
+          # Both marker strings are assembled at run time, and neither can be
+          # written literally here -- not even inside this comment:
+          #   - Actions expands an expression delimiter inside a run block before
+          #     bash ever sees it, and it does so in comments too. Writing one
+          #     literally either strips the injection out of the fixture or fails
+          #     to parse the workflow outright.
+          #   - This repository's contract validator rejects the literal name of a
+          #     GitHub-hosted runner anywhere in this file, and it is right to.
+          dollar='$'
+          printf '%s\n' \
+            'name: fixture' \
+            'on: [issues]' \
+            'jobs:' \
+            '  demo:' \
+            '    runs-on: self-hosted' \
+            '    steps:' \
+            "      - run: echo \"${dollar}{{ github.event.issue.title }}\"" \
+            > "$fixture/.github/workflows/fixture.yml"
+
+          grep -q 'github.event.issue.title' "$fixture/.github/workflows/fixture.yml" \
+            || { echo '::error::The self-test fixture lost its injection marker'; exit 1; }
+
+          semgrep scan --metrics=off --config p/default \
+            --json --output "$fixture/report.json" "$fixture" || true
+          hits="$(jq '[ .results[]?
+                        | select(.extra.severity == "ERROR")
+                        | select(.extra.metadata.confidence == "HIGH") ] | length' \
+                     "$fixture/report.json")"
+          if [[ "$hits" -lt 1 ]]; then
+            echo '::error::Semgrep did not flag the synthetic shell injection at ERROR/HIGH'
+            exit 1
+          fi
+          echo "Semgrep detected the synthetic fixture ($hits finding(s))."
 
       - name: Prove both scanners detect a synthetic secret
         if: inputs.self-test
@@ -217,12 +303,80 @@ jobs:
 
           gitleaks git --redact --no-banner --exit-code 1 --log-opts="$log_opts" .
 
+      - name: Scan source for vulnerable code patterns
+        id: sast
+        if: inputs.sast
+        continue-on-error: true
+        shell: bash
+        env:
+          SAST_SEVERITY: ${{ inputs.sast-severity }}
+          SAST_MIN_CONFIDENCE: ${{ inputs.sast-min-confidence }}
+        run: |
+          set -euo pipefail
+
+          report="${RUNNER_TEMP}/semgrep-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+
+          # Semgrep exits non-zero on findings; the verdict is computed below from
+          # the report instead, so a clean run must not abort the step here.
+          semgrep scan \
+            --metrics=off \
+            --config p/default \
+            --config p/secrets \
+            --exclude node_modules --exclude dist --exclude build \
+            --exclude coverage --exclude .next --exclude .git \
+            --exclude '*.min.js' \
+            --json --output "$report" \
+            . || true
+
+          if [[ ! -s "$report" ]]; then
+            echo '::error::Semgrep produced no report'
+            exit 1
+          fi
+
+          # Semgrep mixes two severity vocabularies across rulesets, so both are
+          # ranked onto one scale. A finding blocks only when it clears BOTH the
+          # severity floor and the rule's own confidence floor; rules with no
+          # confidence metadata are treated as MEDIUM so nothing is dropped silently.
+          rank_filter='
+            def rank:
+              ascii_upcase
+              | if . == "ERROR" or . == "CRITICAL" or . == "HIGH" then 3
+                elif . == "WARNING" or . == "MEDIUM" then 2
+                else 1 end;
+            (env.SAST_SEVERITY | rank) as $floor
+            | (env.SAST_MIN_CONFIDENCE | rank) as $cfloor
+            | [ .results[]?
+                | select((.extra.severity // "INFO" | rank) >= $floor)
+                | select((.extra.metadata.confidence // "MEDIUM" | rank) >= $cfloor) ]'
+
+          blocking="$(jq -r "$rank_filter | length" "$report")"
+          total="$(jq -r '.results | length' "$report")"
+          scan_errors="$(jq -r '.errors | length' "$report")"
+
+          echo "Semgrep: ${total} finding(s), ${blocking} blocking (severity >= ${SAST_SEVERITY}, confidence >= ${SAST_MIN_CONFIDENCE}), ${scan_errors} scan error(s)."
+
+          {
+            echo "### Semgrep OSS"
+            echo ""
+            echo "- Findings: **${total}** total, **${blocking}** blocking"
+            echo "- Blocking threshold: severity >= \`${SAST_SEVERITY}\`, confidence >= \`${SAST_MIN_CONFIDENCE}\`"
+            echo ""
+            jq -r "$rank_filter"' | .[]
+              | "- `\(.check_id)` — \(.path):\(.start.line)"' "$report" | head -50
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          jq -r "$rank_filter"' | .[]
+            | "::error file=\(.path),line=\(.start.line)::\(.check_id) — \(.extra.message // "" | split("\n")[0])"' "$report"
+
+          [[ "$blocking" -eq 0 ]]
+
       - name: Create or update the security incident
         if: >-
           always() && inputs.notify-on-failure &&
           (steps.dependencies.outcome == 'failure' ||
           steps.current-secrets.outcome == 'failure' ||
-          steps.history-secrets.outcome == 'failure')
+          steps.history-secrets.outcome == 'failure' ||
+          steps.sast.outcome == 'failure')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -230,6 +384,7 @@ jobs:
               'Dependencias o configuración': '${{ steps.dependencies.outcome }}',
               'Secretos en archivos actuales': '${{ steps.current-secrets.outcome }}',
               'Secretos en el historial Git': '${{ steps.history-secrets.outcome }}',
+              'Código vulnerable (Semgrep)': '${{ steps.sast.outcome }}',
             };
             const failures = Object.entries(outcomes)
               .filter(([, outcome]) => outcome === 'failure')
@@ -277,7 +432,8 @@ jobs:
           always() &&
           (steps.dependencies.outcome == 'failure' ||
           steps.current-secrets.outcome == 'failure' ||
-          steps.history-secrets.outcome == 'failure')
+          steps.history-secrets.outcome == 'failure' ||
+          steps.sast.outcome == 'failure')
         shell: bash
         run: |
           echo '::error::The private security scan found a blocking issue. Review the failed scanner step and repository incident.'
