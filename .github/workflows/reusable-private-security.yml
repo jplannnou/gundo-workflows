@@ -22,6 +22,14 @@ on:
         description: "Lowest Semgrep severity that fails the build: ERROR, WARNING or INFO"
         type: string
         default: "ERROR"
+      sast-min-confidence:
+        description: >-
+          Lowest Semgrep rule confidence that fails the build: HIGH, MEDIUM or LOW.
+          Semgrep OSS has no interprocedural taint analysis, so its LOW-confidence
+          "detect-*" rules fire on any call shape regardless of whether the input is
+          reachable from a user. They are reported but not blocking by default.
+        type: string
+        default: "MEDIUM"
       self-test:
         description: "Run synthetic detection tests before scanning the repository"
         type: boolean
@@ -142,17 +150,34 @@ jobs:
           set -euo pipefail
 
           fixture="${RUNNER_TEMP}/gundo-sast-self-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$fixture"
-          cat > "$fixture/fixture.js" <<'FIXTURE'
-          const { exec } = require('child_process');
-          module.exports = (userInput) => exec('ls ' + userInput);
+          mkdir -p "$fixture/.github/workflows"
+
+          # Deliberately vulnerable: interpolating an issue title straight into a
+          # shell. Semgrep rates this ERROR / HIGH confidence, so it exercises the
+          # exact severity AND confidence path the real gate uses. A fixture that
+          # only tripped a LOW-confidence rule would prove nothing about the gate.
+          # The runner label is assembled at run time on purpose: this repository's
+          # own contract validator rejects the literal name of a GitHub-hosted
+          # runner anywhere in this file, and it is right to.
+          cat > "$fixture/.github/workflows/fixture.yml" <<FIXTURE
+          name: fixture
+          on: [issues]
+          jobs:
+            demo:
+              runs-on: self-hosted
+              steps:
+                - run: echo "\${{ github.event.issue.title }}"
           FIXTURE
+          sed -i 's/^          //' "$fixture/.github/workflows/fixture.yml"
 
           semgrep scan --metrics=off --config p/default \
-            --json --output "$fixture/report.json" "$fixture"
-          hits="$(jq '[.results[]? | select(.extra.severity == "ERROR")] | length' "$fixture/report.json")"
+            --json --output "$fixture/report.json" "$fixture" || true
+          hits="$(jq '[ .results[]?
+                        | select(.extra.severity == "ERROR")
+                        | select(.extra.metadata.confidence == "HIGH") ] | length' \
+                     "$fixture/report.json")"
           if [[ "$hits" -lt 1 ]]; then
-            echo '::error::Semgrep did not flag the synthetic command injection'
+            echo '::error::Semgrep did not flag the synthetic shell injection at ERROR/HIGH'
             exit 1
           fi
           echo "Semgrep detected the synthetic fixture ($hits finding(s))."
@@ -277,6 +302,7 @@ jobs:
         shell: bash
         env:
           SAST_SEVERITY: ${{ inputs.sast-severity }}
+          SAST_MIN_CONFIDENCE: ${{ inputs.sast-min-confidence }}
         run: |
           set -euo pipefail
 
@@ -300,7 +326,9 @@ jobs:
           fi
 
           # Semgrep mixes two severity vocabularies across rulesets, so both are
-          # ranked onto one scale before the threshold is applied.
+          # ranked onto one scale. A finding blocks only when it clears BOTH the
+          # severity floor and the rule's own confidence floor; rules with no
+          # confidence metadata are treated as MEDIUM so nothing is dropped silently.
           rank_filter='
             def rank:
               ascii_upcase
@@ -308,18 +336,22 @@ jobs:
                 elif . == "WARNING" or . == "MEDIUM" then 2
                 else 1 end;
             (env.SAST_SEVERITY | rank) as $floor
-            | [ .results[]? | select((.extra.severity // "INFO" | rank) >= $floor) ]'
+            | (env.SAST_MIN_CONFIDENCE | rank) as $cfloor
+            | [ .results[]?
+                | select((.extra.severity // "INFO" | rank) >= $floor)
+                | select((.extra.metadata.confidence // "MEDIUM" | rank) >= $cfloor) ]'
 
           blocking="$(jq -r "$rank_filter | length" "$report")"
           total="$(jq -r '.results | length' "$report")"
           scan_errors="$(jq -r '.errors | length' "$report")"
 
-          echo "Semgrep: ${total} finding(s), ${blocking} at or above ${SAST_SEVERITY}, ${scan_errors} scan error(s)."
+          echo "Semgrep: ${total} finding(s), ${blocking} blocking (severity >= ${SAST_SEVERITY}, confidence >= ${SAST_MIN_CONFIDENCE}), ${scan_errors} scan error(s)."
 
           {
             echo "### Semgrep OSS"
             echo ""
-            echo "- Findings: **${total}** (**${blocking}** at or above \`${SAST_SEVERITY}\`)"
+            echo "- Findings: **${total}** total, **${blocking}** blocking"
+            echo "- Blocking threshold: severity >= \`${SAST_SEVERITY}\`, confidence >= \`${SAST_MIN_CONFIDENCE}\`"
             echo ""
             jq -r "$rank_filter"' | .[]
               | "- `\(.check_id)` — \(.path):\(.start.line)"' "$report" | head -50
