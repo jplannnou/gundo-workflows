@@ -11,7 +11,17 @@ on:
         type: string
         required: true
       vulnerability-severity:
-        description: "Trivy vulnerability and misconfiguration gate"
+        description: "Trivy vulnerability and misconfiguration gate on push, schedule and manual runs"
+        type: string
+        default: "CRITICAL"
+      pull-request-vulnerability-severity:
+        description: >-
+          Trivy gate on pull requests, kept separate on purpose. Dependency debt
+          is a property of the repository, not of the change under review, so a
+          stricter floor here blocks every merge until the backlog is cleared --
+          including the merges that would clear it. The scheduled run keeps the
+          stricter floor and still opens the incident. Lower this to match
+          `vulnerability-severity` once the backlog reaches zero.
         type: string
         default: "CRITICAL"
       sast:
@@ -244,15 +254,24 @@ jobs:
         id: dependencies
         continue-on-error: true
         shell: bash
+        env:
+          # En un pull_request el suelo es el de PR; en push, schedule y manual
+          # es el estricto. `github.event_name` dentro de un reusable es el del
+          # evento que disparo al caller, que es justo lo que hace falta aqui.
+          TRIVY_SEVERITY: >-
+            ${{ github.event_name == 'pull_request'
+                && inputs.pull-request-vulnerability-severity
+                || inputs.vulnerability-severity }}
         run: |
           set -euo pipefail
           cache_dir="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gundo-trivy-cache"
           mkdir -p "$cache_dir"
+          echo "Trivy severity floor for ${GITHUB_EVENT_NAME}: ${TRIVY_SEVERITY}"
           trivy fs \
             --cache-dir "$cache_dir" \
             --scanners vuln,misconfig \
             --include-dev-deps \
-            --severity '${{ inputs.vulnerability-severity }}' \
+            --severity "$TRIVY_SEVERITY" \
             --ignore-unfixed \
             --exit-code 1 \
             --no-progress \
