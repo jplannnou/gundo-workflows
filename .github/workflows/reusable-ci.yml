@@ -94,7 +94,20 @@ jobs:
         with:
           version: ${{ inputs.pnpm-version }}
 
-      - name: Setup Node
+      - name: Setup Node (persistent runner)
+        if: inputs.runner == 'gundo-local'
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@jplannnou'
+
+      # Los runners gundo-local conservan el store de pnpm en disco entre jobs.
+      # Bajar el mismo store desde GitHub era redundante y, con un cache medido
+      # de 3 GB, dejaba Setup Node varios minutos bloqueado. Los hosted siguen
+      # usando cache porque su filesystem es efimero.
+      - name: Setup Node (ephemeral runner)
+        if: inputs.runner != 'gundo-local'
         uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.node-version }}
