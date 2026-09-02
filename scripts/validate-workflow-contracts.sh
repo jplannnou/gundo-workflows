@@ -52,4 +52,28 @@ for contract in 'fetch-depth: 0' 'trivy fs' '--include-dev-deps' 'gitleaks git' 
   fi
 done
 
+# Ningun reusable puede resolver a un runner de pago. Tres invariantes, todas
+# fail-closed, porque el fallo que las motiva era invisible: `lint-reusable.yml`
+# tenia `default: ubuntu-latest` en el input `runner`, y los consumidores que se
+# olvidaban de declararlo se iban a minutos facturados sin ninguna senal en su
+# propio YAML. Solo se veia mirando `runner_name` en los jobs ya ejecutados.
+shopt -s nullglob
+for reusable in .github/workflows/reusable-*.yml; do
+  if grep -En '^ *runs-on:.*(ubuntu|windows|macos)-' "$reusable"; then
+    echo "::error file=$reusable::Los reusables no pueden usar runners GitHub-hosted"
+    exit 1
+  fi
+
+  if ! grep -Eq '^ *runs-on: \[self-hosted' "$reusable"; then
+    echo "::error file=$reusable::runs-on debe empezar por [self-hosted, ...] para no poder caer en un runner de pago"
+    exit 1
+  fi
+
+  if grep -A8 -E '^      runner(-label)?:' "$reusable" | grep -Eq "default: *['\"]?(ubuntu|windows|macos)-"; then
+    echo "::error file=$reusable::El input de runner no puede tener default alojado; usa required: true"
+    exit 1
+  fi
+done
+shopt -u nullglob
+
 echo 'Workflow contracts are current.'
