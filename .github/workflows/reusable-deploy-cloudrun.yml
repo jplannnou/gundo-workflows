@@ -21,11 +21,11 @@ on:
     inputs:
       runner:
         description: >-
-          Label del runner donde corre el job de deploy. Default ubuntu-latest
-          (GitHub-hosted). Los repos del org pasan `gundo-local` para usar los
-          self-hosted runners (migración 2026-07 por cuota de minutos).
+          Label del runner self-hosted: `gundo-local` en los repos del org,
+          `jp-local` en los privados personales. Sin default a proposito: un
+          default alojado convertia cada olvido en minutos de pago silenciosos.
         type: string
-        default: 'ubuntu-latest'
+        required: true
       gcp-project:
         type: string
         required: true
@@ -181,7 +181,7 @@ permissions:
 jobs:
   deploy:
     name: Canary deploy
-    runs-on: ${{ inputs.runner }}
+    runs-on: [self-hosted, "${{ inputs.runner }}"]
     outputs:
       status: ${{ steps.outcome.outputs.status }}
       revision: ${{ steps.deploy-new.outputs.revision }}

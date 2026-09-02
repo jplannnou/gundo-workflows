@@ -18,9 +18,12 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: 'Runner label. gundo-local = self-hosted (default hosted por compatibilidad).'
+        description: >-
+          Label del runner self-hosted: `gundo-local` en los repos del org,
+          `jp-local` en los privados personales. Sin default a proposito: un
+          default alojado convertia cada olvido en minutos de pago silenciosos.
         type: string
-        default: 'ubuntu-latest'
+        required: true
       run-lint:
         description: 'Correr lint. false = repo aun sin config de ESLint estandar (adopcion por fases).'
         type: boolean
@@ -61,7 +64,7 @@ on:
 jobs:
   prepare:
     name: Resolve workspace matrix
-    runs-on: ${{ inputs.runner }}
+    runs-on: [self-hosted, "${{ inputs.runner }}"]
     outputs:
       workspaces: ${{ steps.split.outputs.json }}
     steps:
@@ -75,7 +78,7 @@ jobs:
   workspace-matrix:
     name: Build workspace
     needs: prepare
-    runs-on: ${{ inputs.runner }}
+    runs-on: [self-hosted, "${{ inputs.runner }}"]
     strategy:
       fail-fast: false
       matrix:
@@ -165,7 +168,7 @@ jobs:
 
   security-scan:
     name: Security scan
-    runs-on: ${{ inputs.runner }}
+    runs-on: [self-hosted, "${{ inputs.runner }}"]
     if: inputs.run-trivy
     steps:
       - name: Checkout
