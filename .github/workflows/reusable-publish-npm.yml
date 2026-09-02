@@ -16,6 +16,13 @@ name: Reusable NPM Publish (semantic-release)
 on:
   workflow_call:
     inputs:
+      runner:
+        description: >-
+          Label del runner self-hosted: `gundo-local` en los repos del org,
+          `jp-local` en los privados personales. Sin default a proposito: un
+          default alojado convertia cada olvido en minutos de pago silenciosos.
+        type: string
+        required: true
       node-version:
         type: string
         default: '22'
@@ -47,7 +54,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, "${{ inputs.runner }}"]
     outputs:
       new-version: ${{ steps.sr.outputs.new_release_version }}
       released: ${{ steps.sr.outputs.new_release_published }}
