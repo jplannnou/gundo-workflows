@@ -347,6 +347,12 @@ jobs:
             --json --output "$report" \
             . || true
 
+          # Semgrep OSS prints its own "Findings: N (N blocking)" summary in
+          # which EVERY finding counts as blocking -- that is its default
+          # policy, not this gate's. Leaving it unlabelled next to the real
+          # verdict has already cost a full investigation, so say so here.
+          echo "::notice::The 'blocking' count in Semgrep's own summary above is NOT this gate's verdict. The 'Gate verdict' line below is."
+
           if [[ ! -s "$report" ]]; then
             echo '::error::Semgrep produced no report'
             exit 1
@@ -372,12 +378,13 @@ jobs:
           total="$(jq -r '.results | length' "$report")"
           scan_errors="$(jq -r '.errors | length' "$report")"
 
-          echo "Semgrep: ${total} finding(s), ${blocking} blocking (severity >= ${SAST_SEVERITY}, confidence >= ${SAST_MIN_CONFIDENCE}), ${scan_errors} scan error(s)."
+          echo "Gate verdict - Semgrep: ${total} finding(s), ${blocking} blocking (severity >= ${SAST_SEVERITY}, confidence >= ${SAST_MIN_CONFIDENCE}), ${scan_errors} scan error(s)."
 
           {
             echo "### Semgrep OSS"
             echo ""
-            echo "- Findings: **${total}** total, **${blocking}** blocking"
+            echo "- Findings: **${total}** total, of which **${blocking}** block this gate"
+            echo "  (Semgrep's own log line counts every finding as blocking; that is not this verdict.)"
             echo "- Blocking threshold: severity >= \`${SAST_SEVERITY}\`, confidence >= \`${SAST_MIN_CONFIDENCE}\`"
             echo ""
             jq -r "$rank_filter"' | .[]
