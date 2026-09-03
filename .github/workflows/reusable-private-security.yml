@@ -58,8 +58,27 @@ jobs:
     name: Dependencies, configuration and secrets
     runs-on: [self-hosted, "${{ inputs.runner-label }}"]
     timeout-minutes: 30
+    # El grupo va por REPO, EVENTO y RAMA, no por etiqueta de runner.
+    #
+    # Con `private-security-<runner-label>` el grupo era, de hecho, GLOBAL: todos
+    # los repos del org que llaman a este workflow con `gundo-local` compartían
+    # una sola ranura. Y `cancel-in-progress: false` no protege lo que uno espera
+    # — impide cancelar el run EN CURSO, pero GitHub sigue cancelando el run EN
+    # COLA cuando llega otro al mismo grupo.
+    #
+    # El efecto medido (gundo-ecommerce-ui, 3-sep-2026): el scan del PR #1397
+    # quedó en cola, entró un run de `main` a las 20:15:14 y el de #1397 murió
+    # a las 20:15:18. Cuatro segundos. Dos veces seguidas. Un check cancelado
+    # deja el PR bloqueado y no dice por qué: no hay pasos, no hay log, y en la
+    # UI se lee igual que un fallo de seguridad de verdad.
+    #
+    # Serializar por runner no hacía falta: la flota local tiene cinco runners y
+    # el propio `runs-on` ya reparte. Lo que sí hace falta es que dos ramas
+    # nunca compitan, y que un `push` no mate al scan programado, que es el que
+    # abre la incidencia.
     concurrency:
-      group: private-security-${{ inputs.runner-label }}
+      group: >-
+        private-security-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: false
     env:
       GITLEAKS_VERSION: "8.30.1"
