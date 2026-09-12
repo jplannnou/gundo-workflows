@@ -92,8 +92,9 @@ jobs:
             gcloud_version=$(gcloud version --format='value("Google Cloud SDK")' 2>/dev/null || true)
           fi
           # 363.0.0 es el minimo que setup-gcloud documenta para Workload Identity.
-          lowest=$(printf '%s\n' 363.0.0 "${gcloud_version:-0}" | sort -V)
-          if [ -n "$gcloud_version" ] && [ "${lowest%%$'\n'*}" = 363.0.0 ]; then
+          # Se compara el numero mayor en bash puro: `sort -V` no esta en todos los runners.
+          gcloud_major="${gcloud_version%%.*}"
+          if [[ "$gcloud_major" =~ ^[0-9]+$ ]] && (( gcloud_major >= 363 )); then
             gcloud_ok=true
             echo "gcloud ${gcloud_version} ya instalado en $(command -v gcloud): no se descarga"
           else
