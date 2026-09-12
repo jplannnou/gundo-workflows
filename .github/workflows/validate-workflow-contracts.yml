@@ -16,3 +16,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Validate shared workflow invariants
         run: bash scripts/validate-workflow-contracts.sh
+      # Cada contrato se rompe a proposito en una copia y el validador debe
+      # rechazarlo: si alguien debilita una regla, este paso se pone rojo.
+      - name: Mutation-test the validator
+        run: bash scripts/test-validate-workflow-contracts.sh

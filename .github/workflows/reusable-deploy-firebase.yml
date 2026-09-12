@@ -126,8 +126,33 @@ jobs:
           service_account: ${{ inputs.service-account }}
           token_format: access_token
 
+      # Sin descargas de raw.githubusercontent.com cuando el runner ya trae
+      # gcloud: `setup-gcloud` con `latest` baja de ahi `versions.json` en cada
+      # job y ese host responde 503 a la IP de la workstation (ver
+      # reusable-build-sign.yml). Si gcloud no esta, se instala como antes.
+      # `scripts/validate-workflow-contracts.sh` exige este cableado.
+      - name: Detectar gcloud ya instalado en el runner
+        id: runner-tools
+        run: |
+          gcloud_ok=false
+          gcloud_version=''
+          if command -v gcloud >/dev/null 2>&1; then
+            gcloud_version=$(gcloud version --format='value("Google Cloud SDK")' 2>/dev/null || true)
+          fi
+          # 363.0.0 es el minimo que setup-gcloud documenta para Workload Identity.
+          lowest=$(printf '%s\n' 363.0.0 "${gcloud_version:-0}" | sort -V)
+          if [ -n "$gcloud_version" ] && [ "${lowest%%$'\n'*}" = 363.0.0 ]; then
+            gcloud_ok=true
+            echo "gcloud ${gcloud_version} ya instalado en $(command -v gcloud): no se descarga"
+          else
+            echo "gcloud no esta en el runner o es anterior a 363.0.0 ('${gcloud_version}'): se instala"
+          fi
+          echo "gcloud=${gcloud_ok}" >> "$GITHUB_OUTPUT"
+
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v3
+        with:
+          skip_install: ${{ steps.runner-tools.outputs.gcloud == 'true' }}
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools@latest

@@ -92,8 +92,56 @@ jobs:
           service_account: ${{ inputs.service-account }}
           token_format: access_token
 
+      # Sin descargas de raw.githubusercontent.com cuando el runner ya trae las
+      # herramientas. `setup-gcloud` con su version por defecto (`latest`) baja
+      # de ahi `versions.json` en cada job, y `cosign-installer` baja la clave
+      # publica de la release. Ese host responde `503 Backend.max_conn reached`
+      # a la IP de la workstation (19 servicios de runner comparten IP): el
+      # 12-sep-2026 tumbo los 4 intentos del deploy de genie-api (run
+      # 34713082782). Los runners locales traen gcloud en /usr/bin y cosign
+      # v2.4.1 en /usr/local/bin: si estan, se usan. Si no estan, se instalan
+      # exactamente como antes.
+      # `COSIGN_RELEASE` debe coincidir con `cosign-release` del paso de Cosign.
+      # `scripts/validate-workflow-contracts.sh` exige este cableado.
+      - name: Detectar gcloud y cosign ya instalados en el runner
+        id: runner-tools
+        env:
+          COSIGN_RELEASE: v2.4.1
+        run: |
+          # Salidas capturadas en variables y no en tuberias con `grep -q` o
+          # `head`: con `pipefail` un SIGPIPE daria un falso "no instalado".
+          gcloud_ok=false
+          gcloud_version=''
+          if command -v gcloud >/dev/null 2>&1; then
+            gcloud_version=$(gcloud version --format='value("Google Cloud SDK")' 2>/dev/null || true)
+          fi
+          # 363.0.0 es el minimo que setup-gcloud documenta para Workload Identity.
+          lowest=$(printf '%s\n' 363.0.0 "${gcloud_version:-0}" | sort -V)
+          if [ -n "$gcloud_version" ] && [ "${lowest%%$'\n'*}" = 363.0.0 ]; then
+            gcloud_ok=true
+            echo "gcloud ${gcloud_version} ya instalado en $(command -v gcloud): no se descarga"
+          else
+            echo "gcloud no esta en el runner o es anterior a 363.0.0 ('${gcloud_version}'): se instala"
+          fi
+          echo "gcloud=${gcloud_ok}" >> "$GITHUB_OUTPUT"
+
+          cosign_ok=false
+          cosign_version=''
+          if command -v cosign >/dev/null 2>&1; then
+            cosign_version=$(cosign version 2>/dev/null || true)
+          fi
+          if grep -Eq "^GitVersion:[[:space:]]+${COSIGN_RELEASE}\$" <<< "$cosign_version"; then
+            cosign_ok=true
+            echo "cosign ${COSIGN_RELEASE} ya instalado en $(command -v cosign): no se descarga"
+          else
+            echo "cosign ${COSIGN_RELEASE} no esta en el runner: se instala"
+          fi
+          echo "cosign=${cosign_ok}" >> "$GITHUB_OUTPUT"
+
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v3
+        with:
+          skip_install: ${{ steps.runner-tools.outputs.gcloud == 'true' }}
 
       - name: Configure Docker auth
         run: |
@@ -132,6 +180,7 @@ jobs:
           sbom: false   # We generate our own below with syft (more control)
 
       - name: Install Cosign
+        if: steps.runner-tools.outputs.cosign != 'true'
         uses: sigstore/cosign-installer@v3
         with:
           cosign-release: 'v2.4.1'
