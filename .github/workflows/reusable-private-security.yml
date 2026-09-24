@@ -94,11 +94,69 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Trivy
-        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
-        with:
-          version: ${{ env.TRIVY_VERSION }}
-          cache: false
+      - name: Install verified Trivy with retry
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # setup-trivy downloads the release with one curl attempt. A transient
+          # GitHub timeout then terminates this mandatory security job before any
+          # scanner can run. Keep the binary version pinned and verify the
+          # release checksum, but retry network failures before failing closed.
+          case "${RUNNER_OS}/${RUNNER_ARCH}" in
+            Linux/X64) asset="trivy_${TRIVY_VERSION#v}_Linux-64bit.tar.gz" ;;
+            Linux/ARM64) asset="trivy_${TRIVY_VERSION#v}_Linux-ARM64.tar.gz" ;;
+            macOS/X64) asset="trivy_${TRIVY_VERSION#v}_macOS-64bit.tar.gz" ;;
+            macOS/ARM64) asset="trivy_${TRIVY_VERSION#v}_macOS-ARM64.tar.gz" ;;
+            Windows/X64) asset="trivy_${TRIVY_VERSION#v}_windows-64bit.zip" ;;
+            *) echo "::error::Unsupported runner ${RUNNER_OS}/${RUNNER_ARCH}"; exit 1 ;;
+          esac
+
+          tool_root="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gundo-trivy/${TRIVY_VERSION}"
+          binary="${tool_root}/trivy"
+          [[ "$RUNNER_OS" == 'Windows' ]] && binary="${binary}.exe"
+
+          if [[ ! -x "$binary" ]]; then
+            download_dir="${RUNNER_TEMP}/trivy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            mkdir -p "$download_dir" "$tool_root"
+            base_url="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}"
+
+            # curl exits non-zero after all attempts, so an unavailable release
+            # still fails the job and the security gate cannot be bypassed.
+            curl --fail --silent --show-error --location \
+              --retry 5 --retry-all-errors --retry-delay 3 \
+              --connect-timeout 20 --max-time 300 \
+              "$base_url/$asset" --output "$download_dir/$asset"
+            curl --fail --silent --show-error --location \
+              --retry 5 --retry-all-errors --retry-delay 3 \
+              --connect-timeout 20 --max-time 300 \
+              "$base_url/trivy_${TRIVY_VERSION#v}_checksums.txt" \
+              --output "$download_dir/checksums.txt"
+
+            expected="$(awk -v file="$asset" '$2 == file { print $1 }' "$download_dir/checksums.txt")"
+            if command -v sha256sum >/dev/null 2>&1; then
+              actual="$(sha256sum "$download_dir/$asset" | awk '{ print $1 }')"
+            elif command -v shasum >/dev/null 2>&1; then
+              actual="$(shasum -a 256 "$download_dir/$asset" | awk '{ print $1 }')"
+            else
+              echo '::error::No SHA-256 utility is available on the runner'
+              exit 1
+            fi
+            if [[ -z "$expected" || "$actual" != "$expected" ]]; then
+              echo '::error::Trivy checksum verification failed'
+              exit 1
+            fi
+
+            if [[ "$asset" == *.zip ]] && command -v unzip >/dev/null 2>&1; then
+              unzip -q "$download_dir/$asset" -d "$tool_root"
+            else
+              tar -xzf "$download_dir/$asset" -C "$tool_root" trivy
+            fi
+            chmod +x "$binary"
+          fi
+
+          "$binary" --version
+          echo "$tool_root" >> "$GITHUB_PATH"
 
       - name: Install verified Gitleaks CLI
         shell: bash
