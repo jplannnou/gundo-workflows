@@ -104,6 +104,10 @@ on:
         description: 'If true, deploy directly to 100% (emergency use only)'
         type: boolean
         default: false
+      stage-only:
+        description: 'If true, create a ready revision with no traffic; the caller owns promotion'
+        type: boolean
+        default: false
       cpu-boost:
         description: 'Enable CPU boost on startup (faster cold starts)'
         type: boolean
@@ -165,6 +169,16 @@ on:
       FEEDBACK_HUB_API_KEY:
         description: 'API key for Feedback Hub /api/devops endpoints'
         required: true
+    outputs:
+      status:
+        description: 'Deployment outcome: promoted, rolled_back, failed, or staged'
+        value: ${{ jobs.deploy.outputs.status }}
+      revision:
+        description: 'Exact revision created by the no-traffic deploy'
+        value: ${{ jobs.deploy.outputs.revision }}
+      rollback-revision:
+        description: 'Revision serving the most traffic before deployment'
+        value: ${{ jobs.deploy.outputs.rollback-revision }}
 
 permissions:
   contents: read
@@ -185,7 +199,14 @@ jobs:
     outputs:
       status: ${{ steps.outcome.outputs.status }}
       revision: ${{ steps.deploy-new.outputs.revision }}
+      rollback-revision: ${{ steps.rollback-target.outputs.revision }}
     steps:
+      - name: Validate deployment mode
+        if: inputs.stage-only == true && inputs.skip-canary == true
+        run: |
+          echo '::error::stage-only and skip-canary cannot both be true'
+          exit 1
+
       - name: Checkout gundo-workflows scripts
         uses: actions/checkout@v5
         with:
@@ -520,7 +541,7 @@ jobs:
           echo "tag=$REVISION_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Shift traffic to canary
-        if: inputs.skip-canary == false
+        if: inputs.skip-canary == false && inputs.stage-only == false
         run: |
           gcloud run services update-traffic ${{ inputs.service }} \
             --region=${{ inputs.gcp-region }} \
@@ -528,7 +549,7 @@ jobs:
             --to-tags=${{ steps.deploy-new.outputs.tag }}=${{ inputs.canary-percent }}
 
       - name: Report canary started
-        if: inputs.skip-canary == false
+        if: inputs.skip-canary == false && inputs.stage-only == false
         env:
           FEEDBACK_HUB_URL: ${{ inputs.feedback-hub-url }}
           FEEDBACK_HUB_API_KEY: ${{ secrets.FEEDBACK_HUB_API_KEY }}
@@ -542,7 +563,7 @@ jobs:
 
       - name: Watch canary SLO
         id: watch
-        if: inputs.skip-canary == false
+        if: inputs.skip-canary == false && inputs.stage-only == false
         continue-on-error: true
         run: |
           bash .gundo-workflows/scripts/canary-watch.sh \
@@ -556,7 +577,7 @@ jobs:
 
       - name: Promote canary to 100%
         id: promote
-        if: inputs.skip-canary == false && steps.watch.outcome == 'success'
+        if: inputs.skip-canary == false && inputs.stage-only == false && steps.watch.outcome == 'success'
         run: |
           gcloud run services update-traffic ${{ inputs.service }} \
             --region=${{ inputs.gcp-region }} \
@@ -566,7 +587,7 @@ jobs:
 
       - name: Rollback
         id: rollback
-        if: inputs.skip-canary == false && steps.watch.outcome == 'failure'
+        if: inputs.skip-canary == false && inputs.stage-only == false && steps.watch.outcome == 'failure'
         run: |
           ROLLBACK_TARGET="${{ steps.rollback-target.outputs.revision }}"
 
@@ -607,6 +628,7 @@ jobs:
       # — success, failure, cancellation — and untags whatever the deploy
       # step created. Idempotent: --remove-tags on a missing tag is a no-op.
       - name: Cleanup canary tag (always)
+        id: cleanup-tag
         if: always() && inputs.skip-canary == false && steps.canary-meta.outputs.tag != ''
         run: |
           TAG="${{ steps.canary-meta.outputs.tag }}"
@@ -667,6 +689,7 @@ jobs:
       # See: incident-cloud-run-remove-tags-strips-iam-2026-05-08.md and the
       # 4th recurrence on gundo-ecommerce-ui 2026-05-21.
       - name: Re-bind public access (always, post-update-traffic)
+        id: rebind-public
         if: always() && inputs.allow-unauthenticated == true
         run: |
           gcloud run services add-iam-policy-binding ${{ inputs.service }} \
@@ -688,7 +711,17 @@ jobs:
         id: outcome
         if: always()
         run: |
-          if [ "${{ inputs.skip-canary }}" = "true" ]; then
+          if [ "${{ inputs.stage-only }}" = "true" ]; then
+            if [ "${{ inputs.skip-canary }}" = "false" ] &&
+               [ "${{ steps.deploy-new.outcome }}" = "success" ] &&
+               [ "${{ steps.cleanup-tag.outcome }}" = "success" ] &&
+               { [ "${{ inputs.allow-unauthenticated }}" = "false" ] ||
+                 [ "${{ steps.rebind-public.outcome }}" = "success" ]; }; then
+              echo "status=staged" >> "$GITHUB_OUTPUT"
+            else
+              echo "status=failed" >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "${{ inputs.skip-canary }}" = "true" ]; then
             if [ "${{ steps.deploy-direct.outcome }}" = "success" ]; then
               echo "status=promoted" >> "$GITHUB_OUTPUT"
             else
@@ -702,7 +735,8 @@ jobs:
             echo "status=failed" >> "$GITHUB_OUTPUT"
           fi
       - name: Report final status
-        if: always()
+        # The caller owns a staged revision's promotion and final report.
+        if: always() && inputs.stage-only == false
         env:
           FEEDBACK_HUB_URL: ${{ inputs.feedback-hub-url }}
           FEEDBACK_HUB_API_KEY: ${{ secrets.FEEDBACK_HUB_API_KEY }}
@@ -723,7 +757,7 @@ jobs:
       # Va ANTES del step que tumba el job a propósito: aquel acaba en `exit 1` y,
       # sin `if: always()`, nada posterior llegaría a ejecutarse.
       - name: Aviso ruidoso si el deploy no promovió
-        if: always() && steps.outcome.outputs.status != 'promoted'
+        if: always() && steps.outcome.outputs.status != 'promoted' && steps.outcome.outputs.status != 'staged'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -772,7 +806,7 @@ jobs:
           fi
 
       - name: Fail job if rolled back or failed
-        if: steps.outcome.outputs.status != 'promoted'
+        if: steps.outcome.outputs.status != 'promoted' && steps.outcome.outputs.status != 'staged'
         run: |
           echo "::error::Deploy ended with status ${{ steps.outcome.outputs.status }}"
           exit 1
