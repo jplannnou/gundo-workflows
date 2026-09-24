@@ -78,8 +78,17 @@ jobs:
           service_account: ${{ inputs.service-account }}
           token_format: access_token
 
+      # `skip_install`: el gcloud del runner, sin descargar nada. Sin él, la
+      # acción baja `versions.json` de raw.githubusercontent.com en cada
+      # ejecución, y ese dominio devolvió 503 a ratos el 12-09-2026 (medido
+      # desde WSL: 503 503 503 200 200 200, con githubstatus en «operativo»):
+      # tumbó dos despliegues de gundo-user-engine-api. Todos los que llaman a
+      # este workflow pasan `gundo-local` o `jp-local`, runners de la misma WSL
+      # con gcloud 577 (con beta y alpha) visible para el usuario `runner`.
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v3
+        with:
+          skip_install: true
 
       - name: Deploy preview revision
         id: deploy

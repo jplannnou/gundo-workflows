@@ -92,8 +92,17 @@ jobs:
           service_account: ${{ inputs.service-account }}
           token_format: access_token
 
+      # `skip_install`: el gcloud del runner, sin descargar nada. Sin él, la
+      # acción baja `versions.json` de raw.githubusercontent.com en cada
+      # ejecución, y ese dominio devolvió 503 a ratos el 12-09-2026 (medido
+      # desde WSL: 503 503 503 200 200 200, con githubstatus en «operativo»):
+      # tumbó dos despliegues de gundo-user-engine-api. Todos los que llaman a
+      # este workflow pasan `gundo-local` o `jp-local`, runners de la misma WSL
+      # con gcloud 577 (con beta y alpha) visible para el usuario `runner`.
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v3
+        with:
+          skip_install: true
 
       - name: Configure Docker auth
         run: |
@@ -131,10 +140,29 @@ jobs:
           provenance: true
           sbom: false   # We generate our own below with syft (more control)
 
+      # 🔴 Sin `sigstore/cosign-installer`: bajaba la clave pública de sigstore de
+      # raw.githubusercontent.com en cada ejecución, y ese dominio falló a ratos
+      # el 12-09-2026 (`curl` exit 22): tumbó dos despliegues de user-engine.
+      #
+      # Binario de las releases de github.com en $RUNNER_TEMP (en WSL2 el runner
+      # no es sudoer y /usr/local/bin da exit 23), con el SHA-256 de v2.4.1
+      # fijado: sacado de `cosign_checksums.txt` y recalculado sobre la descarga.
+      # Conserva la verificación que hacía el instalador; cambiar la versión sin
+      # cambiar el hash hace fallar el paso.
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
-        with:
-          cosign-release: 'v2.4.1'
+        env:
+          COSIGN_VERSION: v2.4.1
+          COSIGN_SHA256: 8b24b946dd5809c6bd93de08033bcf6bc0ed7d336b7785787c080f574b89249b
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 --retry-all-errors \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+            -o "$RUNNER_TEMP/bin/cosign"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/cosign" version
 
       - name: Sign image (keyless OIDC)
         env:

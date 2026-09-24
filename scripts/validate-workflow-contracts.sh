@@ -76,4 +76,39 @@ for reusable in .github/workflows/reusable-*.yml; do
 done
 shopt -u nullglob
 
+# Nada de descargas de raw.githubusercontent.com en tiempo de ejecucion.
+#
+# El 12-09-2026 ese dominio devolvio 503 a ratos (medido desde WSL:
+# 503 503 503 200 200 200, con githubstatus en "operativo") y tumbo dos
+# despliegues de gundo-user-engine-api por dos pasos que lo usaban sin decirlo:
+# `sigstore/cosign-installer` (baja la clave de sigstore de ahi) y
+# `setup-gcloud` sin `skip_install` (baja `versions.json` de ahi). Todos los
+# consumidores corren en runners de la misma WSL con gcloud instalado.
+# Se ignoran los comentarios, que es donde se explica el porque.
+fragile_downloads=$(grep -REn 'sigstore/cosign-installer|raw\.githubusercontent\.com' .github actions \
+  | grep -Ev '^[^:]+:[0-9]+: *#' || true)
+if [[ -n "$fragile_downloads" ]]; then
+  printf '%s\n' "$fragile_downloads"
+  echo '::error::Descarga fragil de raw.githubusercontent.com (cosign-installer o URL directa): usa releases de github.com con SHA-256 fijado'
+  exit 1
+fi
+
+# Cada setup-gcloud debe llevar `skip_install: true` en su bloque `with:`.
+# awk POSIX a proposito (sin ENDFILE de gawk): la WSL de los runners trae mawk.
+gcloud_without_skip=$(awk '
+  FNR == 1 { if (pending != "") print pending; pending = "" }
+  /^[[:space:]]*#/ { next }
+  pending != "" {
+    if ($0 ~ /skip_install:[[:space:]]*true[[:space:]]*$/) { pending = ""; next }
+    if ($0 ~ /^[[:space:]]*- / || $0 ~ /^[[:space:]]*$/) { print pending; pending = "" }
+  }
+  /google-github-actions\/setup-gcloud@/ { pending = FILENAME ":" FNR }
+  END { if (pending != "") print pending }
+' .github/workflows/*.yml actions/*/action.yml 2>/dev/null || true)
+if [[ -n "$gcloud_without_skip" ]]; then
+  printf '%s\n' "$gcloud_without_skip"
+  echo '::error::setup-gcloud sin skip_install: true baja versions.json de raw.githubusercontent.com en cada ejecucion'
+  exit 1
+fi
+
 echo 'Workflow contracts are current.'
