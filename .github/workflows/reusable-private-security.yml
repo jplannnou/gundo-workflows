@@ -112,48 +112,51 @@ jobs:
             *) echo "::error::Unsupported runner ${RUNNER_OS}/${RUNNER_ARCH}"; exit 1 ;;
           esac
 
-          tool_root="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gundo-trivy/${TRIVY_VERSION}"
+          # The previous action explicitly disabled its cache. Keep the same
+          # trust boundary: every run downloads into its own temporary directory
+          # and validates the release before exposing it on PATH.
+          tool_root="${RUNNER_TEMP}/gundo-trivy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           binary="${tool_root}/trivy"
           [[ "$RUNNER_OS" == 'Windows' ]] && binary="${binary}.exe"
 
-          if [[ ! -x "$binary" ]]; then
-            download_dir="${RUNNER_TEMP}/trivy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            mkdir -p "$download_dir" "$tool_root"
-            base_url="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}"
+          download_dir="${RUNNER_TEMP}/trivy-download-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$download_dir" "$tool_root"
+          base_url="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}"
 
-            # curl exits non-zero after all attempts, so an unavailable release
-            # still fails the job and the security gate cannot be bypassed.
-            curl --fail --silent --show-error --location \
-              --retry 5 --retry-all-errors --retry-delay 3 \
-              --connect-timeout 20 --max-time 300 \
-              "$base_url/$asset" --output "$download_dir/$asset"
-            curl --fail --silent --show-error --location \
-              --retry 5 --retry-all-errors --retry-delay 3 \
-              --connect-timeout 20 --max-time 300 \
-              "$base_url/trivy_${TRIVY_VERSION#v}_checksums.txt" \
-              --output "$download_dir/checksums.txt"
+          # Each request has at most six 90-second transfer attempts plus backoff.
+          # Downloading the archive and checksum therefore consumes less than
+          # twenty minutes, leaving room in this 30-minute mandatory gate for
+          # the scanners themselves. An unavailable release still fails closed.
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 \
+            --connect-timeout 20 --max-time 90 \
+            "$base_url/$asset" --output "$download_dir/$asset"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 3 \
+            --connect-timeout 20 --max-time 90 \
+            "$base_url/trivy_${TRIVY_VERSION#v}_checksums.txt" \
+            --output "$download_dir/checksums.txt"
 
-            expected="$(awk -v file="$asset" '$2 == file { print $1 }' "$download_dir/checksums.txt")"
-            if command -v sha256sum >/dev/null 2>&1; then
-              actual="$(sha256sum "$download_dir/$asset" | awk '{ print $1 }')"
-            elif command -v shasum >/dev/null 2>&1; then
-              actual="$(shasum -a 256 "$download_dir/$asset" | awk '{ print $1 }')"
-            else
-              echo '::error::No SHA-256 utility is available on the runner'
-              exit 1
-            fi
-            if [[ -z "$expected" || "$actual" != "$expected" ]]; then
-              echo '::error::Trivy checksum verification failed'
-              exit 1
-            fi
-
-            if [[ "$asset" == *.zip ]] && command -v unzip >/dev/null 2>&1; then
-              unzip -q "$download_dir/$asset" -d "$tool_root"
-            else
-              tar -xzf "$download_dir/$asset" -C "$tool_root" trivy
-            fi
-            chmod +x "$binary"
+          expected="$(awk -v file="$asset" '$2 == file { print $1 }' "$download_dir/checksums.txt")"
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$download_dir/$asset" | awk '{ print $1 }')"
+          elif command -v shasum >/dev/null 2>&1; then
+            actual="$(shasum -a 256 "$download_dir/$asset" | awk '{ print $1 }')"
+          else
+            echo '::error::No SHA-256 utility is available on the runner'
+            exit 1
           fi
+          if [[ -z "$expected" || "$actual" != "$expected" ]]; then
+            echo '::error::Trivy checksum verification failed'
+            exit 1
+          fi
+
+          if [[ "$asset" == *.zip ]] && command -v unzip >/dev/null 2>&1; then
+            unzip -q "$download_dir/$asset" -d "$tool_root"
+          else
+            tar -xzf "$download_dir/$asset" -C "$tool_root" trivy
+          fi
+          chmod +x "$binary"
 
           "$binary" --version
           echo "$tool_root" >> "$GITHUB_PATH"
