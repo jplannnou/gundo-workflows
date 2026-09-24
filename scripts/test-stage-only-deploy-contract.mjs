@@ -30,11 +30,18 @@ test('invalid stage-only plus direct deployment fails before cloud auth', () => 
   assert.ok(workflow.indexOf('Validate deployment mode') < workflow.indexOf('Authenticate to Google Cloud'));
 });
 
-test('staging creates a tagged revision with no traffic and never shifts or promotes it', () => {
+test('staging creates an exact revision without a traffic tag or traffic mutation', () => {
   const deploy = step('Deploy new revision (no traffic)');
   assert.match(deploy, /if: inputs\.skip-canary == false/);
   assert.match(deploy, /--no-traffic/);
-  assert.match(deploy, /--tag="\$REVISION_TAG"/);
+  assert.match(deploy, /revision_suffix="s\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"/);
+  assert.match(deploy, /--revision-suffix="\$revision_suffix"/);
+  assert.match(deploy, /Staged revision is not Ready/);
+  assert.ok(deploy.indexOf('exit 0') < deploy.indexOf('REVISION_TAG='));
+  assert.match(step('Prepare canary metadata'), /inputs\.stage-only == false/);
+  assert.match(step('Sweep orphan canary tags'), /if: inputs\.stage-only == false/);
+  assert.match(step('Cleanup canary tag (always)'), /inputs\.stage-only == false/);
+  assert.match(step('Re-bind public access (always, post-update-traffic)'), /inputs\.stage-only == false/);
   for (const name of [
     'Shift traffic to canary',
     'Report canary started',
@@ -47,15 +54,13 @@ test('staging creates a tagged revision with no traffic and never shifts or prom
   assert.match(step('Deploy direct (skip canary, emergency)'), /if: inputs\.skip-canary == true/);
 });
 
-test('stage-only succeeds only after cleanup and public access restoration', () => {
+test('stage-only succeeds only for a ready no-traffic deploy, without final promotion report', () => {
   assert.match(step('Cleanup canary tag (always)'), /id: cleanup-tag/);
   assert.match(step('Re-bind public access (always, post-update-traffic)'), /id: rebind-public/);
   const outcome = step('Determine outcome');
   assert.match(outcome, /inputs\.stage-only/);
   assert.match(outcome, /steps\.deploy-new\.outcome/);
-  assert.match(outcome, /steps\.cleanup-tag\.outcome/);
-  assert.match(outcome, /steps\.rebind-public\.outcome/);
   assert.match(outcome, /status=staged/);
-  assert.match(step('Report final status'), /if: always\(\) && inputs\.stage-only == false/);
+  assert.match(step('Report final status'), /inputs\.stage-only == false \|\| steps\.outcome\.outputs\.status != 'staged'/);
   assert.match(step('Fail job if rolled back or failed'), /status != 'staged'/);
 });

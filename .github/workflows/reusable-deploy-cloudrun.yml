@@ -378,7 +378,7 @@ jobs:
       # tag and every later deploy fails while Cloud Run tries to route it.
       - name: Prepare canary metadata
         id: canary-meta
-        if: inputs.skip-canary == false
+        if: inputs.skip-canary == false && inputs.stage-only == false
         run: echo "tag=canary-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       # Barrido de tags `canary-*` HUÉRFANOS que dejaron runs ANTERIORES.
@@ -415,6 +415,7 @@ jobs:
       # público, igual que el resto de llamadas a `update-traffic`. Lo recoge
       # el step `Re-bind public access (always, post-update-traffic)` del final.
       - name: Sweep orphan canary tags
+        if: inputs.stage-only == false
         continue-on-error: true
         run: |
           bash .gundo-workflows/scripts/sweep-canary-tags.sh \
@@ -502,12 +503,37 @@ jobs:
         if: inputs.skip-canary == false
         timeout-minutes: 30
         run: |
-          REVISION_TAG="${{ steps.canary-meta.outputs.tag }}"
-
           # Read flags as array — preserves each token without re-parsing,
           # so values containing |, ||, $, etc. are passed verbatim to gcloud.
           mapfile -t flags < "${{ steps.flags.outputs.flags-file }}"
 
+          if [ "${{ inputs.stage-only }}" = "true" ]; then
+            # No traffic tag or update-traffic call is allowed before the caller
+            # checks its certified SHA. A deterministic suffix gives the caller
+            # an exact revision without mutating the live service's traffic/IAM.
+            revision_suffix="s${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            revision="${{ inputs.service }}-${revision_suffix}"
+            if [ "${#revision}" -gt 63 ]; then
+              echo "::error::Revision name exceeds Cloud Run's 63-character limit: $revision"
+              exit 1
+            fi
+            gcloud run deploy "${{ inputs.service }}" \
+              "${flags[@]}" \
+              --no-traffic \
+              --revision-suffix="$revision_suffix"
+            ready=$(gcloud run revisions describe "$revision" \
+              --region=${{ inputs.gcp-region }} \
+              --project=${{ inputs.gcp-project }} \
+              --format=json | jq -r '[.status.conditions[]? | select(.type == "Ready") | .status] | first // "False"')
+            if [ "$ready" != "True" ]; then
+              echo "::error::Staged revision is not Ready: $revision ($ready)"
+              exit 1
+            fi
+            echo "revision=$revision" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          REVISION_TAG="${{ steps.canary-meta.outputs.tag }}"
           gcloud run deploy "${{ inputs.service }}" \
             "${flags[@]}" \
             --no-traffic \
@@ -629,7 +655,7 @@ jobs:
       # step created. Idempotent: --remove-tags on a missing tag is a no-op.
       - name: Cleanup canary tag (always)
         id: cleanup-tag
-        if: always() && inputs.skip-canary == false && steps.canary-meta.outputs.tag != ''
+        if: always() && inputs.skip-canary == false && inputs.stage-only == false && steps.canary-meta.outputs.tag != ''
         run: |
           TAG="${{ steps.canary-meta.outputs.tag }}"
 
@@ -690,7 +716,7 @@ jobs:
       # 4th recurrence on gundo-ecommerce-ui 2026-05-21.
       - name: Re-bind public access (always, post-update-traffic)
         id: rebind-public
-        if: always() && inputs.allow-unauthenticated == true
+        if: always() && inputs.allow-unauthenticated == true && inputs.stage-only == false
         run: |
           gcloud run services add-iam-policy-binding ${{ inputs.service }} \
             --region=${{ inputs.gcp-region }} \
@@ -713,10 +739,7 @@ jobs:
         run: |
           if [ "${{ inputs.stage-only }}" = "true" ]; then
             if [ "${{ inputs.skip-canary }}" = "false" ] &&
-               [ "${{ steps.deploy-new.outcome }}" = "success" ] &&
-               [ "${{ steps.cleanup-tag.outcome }}" = "success" ] &&
-               { [ "${{ inputs.allow-unauthenticated }}" = "false" ] ||
-                 [ "${{ steps.rebind-public.outcome }}" = "success" ]; }; then
+               [ "${{ steps.deploy-new.outcome }}" = "success" ]; then
               echo "status=staged" >> "$GITHUB_OUTPUT"
             else
               echo "status=failed" >> "$GITHUB_OUTPUT"
@@ -735,8 +758,9 @@ jobs:
             echo "status=failed" >> "$GITHUB_OUTPUT"
           fi
       - name: Report final status
-        # The caller owns a staged revision's promotion and final report.
-        if: always() && inputs.stage-only == false
+        # The caller owns a successful staged revision's final report. A failed
+        # stage is terminal here, so it must not leave Feedback Hub in building.
+        if: always() && (inputs.stage-only == false || steps.outcome.outputs.status != 'staged')
         env:
           FEEDBACK_HUB_URL: ${{ inputs.feedback-hub-url }}
           FEEDBACK_HUB_API_KEY: ${{ secrets.FEEDBACK_HUB_API_KEY }}
