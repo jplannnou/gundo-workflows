@@ -95,6 +95,7 @@ jobs:
           persist-credentials: false
 
       - name: Install verified Trivy with retry
+        timeout-minutes: 12
         shell: bash
         run: |
           set -euo pipefail
@@ -115,27 +116,43 @@ jobs:
           # The previous action explicitly disabled its cache. Keep the same
           # trust boundary: every run downloads into its own temporary directory
           # and validates the release before exposing it on PATH.
-          tool_root="${RUNNER_TEMP}/gundo-trivy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          umask 077
+          tool_root="$(mktemp -d "${RUNNER_TEMP}/gundo-trivy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
           binary="${tool_root}/trivy"
           [[ "$RUNNER_OS" == 'Windows' ]] && binary="${binary}.exe"
 
-          download_dir="${RUNNER_TEMP}/trivy-download-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$download_dir" "$tool_root"
+          download_dir="$(mktemp -d "${RUNNER_TEMP}/trivy-download-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
           base_url="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}"
 
-          # Each request has at most six 90-second transfer attempts plus backoff.
-          # Downloading the archive and checksum therefore consumes less than
-          # twenty minutes, leaving room in this 30-minute mandatory gate for
-          # the scanners themselves. An unavailable release still fails closed.
-          curl --fail --silent --show-error --location \
-            --retry 5 --retry-all-errors --retry-delay 3 \
-            --connect-timeout 20 --max-time 90 \
-            "$base_url/$asset" --output "$download_dir/$asset"
-          curl --fail --silent --show-error --location \
-            --retry 5 --retry-all-errors --retry-delay 3 \
-            --connect-timeout 20 --max-time 90 \
-            "$base_url/trivy_${TRIVY_VERSION#v}_checksums.txt" \
-            --output "$download_dir/checksums.txt"
+          # curl checks its total retry budget before starting another attempt;
+          # one final transfer can add at most 60 seconds to the 240-second
+          # budget. Two requests fit within ten minutes; the step itself is
+          # capped at twelve, leaving time for scans in the 30-minute job.
+          download_release() {
+            local filename="$1" destination="$2" code category
+            if curl --fail --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' \
+              --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 240 \
+              --connect-timeout 20 --max-time 60 \
+              "$base_url/$filename" --output "$destination" \
+              2> "$download_dir/transport-error.txt"; then
+              return 0
+            else
+              code=$?
+            fi
+            # Categorize transport failure without exposing raw provider text.
+            # This is not a vulnerability finding and does not skip the gate.
+            case "$code" in
+              28) category='transport-timeout' ;;
+              22) category='release-unavailable' ;;
+              6|7|35|52|56) category='transport-unavailable' ;;
+              *) category='download-failed' ;;
+            esac
+            echo "::error::Trivy installation failed: ${category} (curl exit ${code})"
+            return 1
+          }
+          download_release "$asset" "$download_dir/$asset"
+          download_release "trivy_${TRIVY_VERSION#v}_checksums.txt" "$download_dir/checksums.txt"
 
           expected="$(awk -v file="$asset" '$2 == file { print $1 }' "$download_dir/checksums.txt")"
           if command -v sha256sum >/dev/null 2>&1; then
@@ -158,7 +175,12 @@ jobs:
           fi
           chmod +x "$binary"
 
-          "$binary" --version
+          installed_version="$("$binary" --version)"
+          if ! grep -Fxq "Version: ${TRIVY_VERSION#v}" <<< "$installed_version"; then
+            echo '::error::Trivy executable version verification failed'
+            exit 1
+          fi
+          echo "Trivy ${TRIVY_VERSION}: archive checksum and executable version verified"
           echo "$tool_root" >> "$GITHUB_PATH"
 
       - name: Install verified Gitleaks CLI
