@@ -1,8 +1,9 @@
 # Trivy: instalación fiable y adopción sin rebajar el gate
 
-Corte observado: 6 de octubre de 2026, 00:32 UTC. Esta reparación está autorizada
-solo como borrador revisado. No hay autorización de integración, despliegue,
-cambios de runners, permisos ni protección de ramas.
+Corte observado inicial: 6 de octubre de 2026, 00:32 UTC. La preparación se
+autorizó solo como borrador revisado. Posteriormente JP autorizó integrar lo
+que esté listo (5 de octubre, hora Bogotá): exige revisión final y checks del
+SHA exacto. No autoriza bypass ni cambios de runners, permisos o protección de ramas.
 
 ## Diagnóstico y alcance
 
@@ -80,19 +81,30 @@ with:
   pull-request-vulnerability-severity: "HIGH,CRITICAL"
 ```
 
-El archivo Mastra `.github/workflows/private-security.yml` está protegido por
-el manifiesto Trinity (`dbdfb07b98b20ff803c90e3fb26e9dbc92a6f32c`) y el propio
-workflow valida su raíz de confianza. Un PR que cambie el caller no basta
-para que ese gate pase. No cambies su política ni el ruleset desde el PR para
-autoaprobarlo. La actualización legítima debe aprobarla el dueño de Trinity.
+El manifiesto Trinity Mastra contiene el blob del caller antiguo
+(`dbdfb07b98b20ff803c90e3fb26e9dbc92a6f32c`). Su comparación de auto-integridad
+usa `github.workflow_sha`, pero eso no acredita por sí mismo una raíz externa
+independiente del PR. Lectura REST posterior (00:54 UTC): el único ruleset
+visible con includes_parents=true, CI gate20203979/master, exige lint / lint,
+Typecheck y Test; no muestra required workflow ni Trinity requerido. La
+protección clásica responde404 Branch not protected. Es un riesgo de
+gobernanza preexistente, no un motivo para autoaprobar la adopción. Un verde
+del workflow propuesto no cierra el riesgo. El dueño debe establecer y
+demostrar un procedimiento confiable antes de integrar el cambio del manifiesto.
+No se modifican rulesets para desbloquearlo.
+
+La propuesta Mastra #542 conserva ambos umbrales y solo cambia el blob esperado
+del caller; sigue en borrador. Su guarda prueba coherencia/rechazo con confianza
+remota simulada, no certifica la raíz real ni autoriza producción.
 
 Secuencia de adopción pendiente:
 
-1. Revisar este borrador y todos sus checks exactos. JP autoriza cualquier
-   integración central: los callers `@v1` heredan ese cambio al ejecutar.
+1. Revisar este borrador y todos sus checks exactos antes de la integración
+   autorizada por JP: los callers `@v1` heredan ese cambio al ejecutar.
 2. Congelar un SHA compartido revisado y preparar el delta Mastra de pin y
    ambos umbrales. Actualizar el manifiesto por el procedimiento confiable de
-   Trinity aprobado por su dueño, sin bypass ni cambios de IAM/runners.
+   Trinity establecido y demostrado por su dueño, sin autoaprobación, bypass
+   ni cambios de IAM/runners en esta reparación.
 3. Reconsultar el SHA de cada consumidor. Validar el workflow realmente
    ejecutado, instalación y scanners terminales; instalación verde sola no es
    seguridad verde. No repetir ciegamente runs anteriores ni heredar checks.
@@ -106,5 +118,6 @@ Secuencia de adopción pendiente:
 - Sistémico: pin antiguo Mastra; tres callers flotantes v1 y cuatro inputs de
   PR implícitos. Riesgos registrados en TECH_DEBT, no reparados en otros repos.
 - Guarda: pruebas offline y mutaciones del código inline real, cableadas en CI.
-- Verificación viva/adopción: pendiente de autoridad y de runs reales exactos.
+- Verificación viva/adopción: pendiente de runs reales exactos y de la
+  gobernanza externa de Mastra, no cerrada por autorizar merges de items listos.
 - Memoria: no escrita; requiere petición explícita de JP.
