@@ -18,6 +18,8 @@ jobs:
         run: bash scripts/validate-workflow-contracts.sh
       - name: Stage-only deployment contract
         run: node --test scripts/test-stage-only-deploy-contract.mjs
+      - name: Trivy installer offline regression and mutation tests
+        run: node --test scripts/test-trivy-installer.mjs
       # Cada contrato de descargas se rompe a proposito en una copia y el
       # validador debe rechazarlo con su error: si alguien debilita una regla,
       # este paso se pone rojo.
