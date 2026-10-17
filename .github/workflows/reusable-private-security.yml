@@ -366,8 +366,11 @@ jobs:
                 || inputs.vulnerability-severity }}
         run: |
           set -euo pipefail
-          cache_dir="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gundo-trivy-cache"
-          mkdir -p "$cache_dir"
+          # Tool cache is shared across self-hosted runners. Concurrent DB
+          # refreshes can leave metadata.json empty (EOF). Never reuse that
+          # mutable database across jobs or trust an interrupted older copy.
+          cache_dir="$(mktemp -d "${RUNNER_TEMP}/gundo-trivy-db-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          trap 'rm -rf -- "$cache_dir"' EXIT
           echo "Trivy severity floor for ${GITHUB_EVENT_NAME}: ${TRIVY_SEVERITY}"
           trivy fs \
             --cache-dir "$cache_dir" \
