@@ -45,12 +45,25 @@ if grep -En 'uses: [^ ]+@(master|main|v[0-9]+([.]|$))' <<< "$private_security_so
   exit 1
 fi
 
-for contract in 'fetch-depth: 0' 'trivy fs' '--include-dev-deps' 'gitleaks git' 'GUNDO_SYNTHETIC_SECRET' 'issues: write' 'escaneo local fallido' 'Install verified Trivy with retry' '--retry 5' 'checksums.txt' 'Trivy checksum verification failed'; do
+for contract in 'fetch-depth: 0' 'trivy fs' '--include-dev-deps' 'gitleaks git' 'GUNDO_SYNTHETIC_SECRET' 'issues: write' 'escaneo local fallido' 'Install verified Trivy with retry' '--retry 5' 'checksums.txt' 'Trivy checksum verification failed' "*) baseline='' ;;"; do
   if ! grep -Fq -- "$contract" <<< "$private_security_source"; then
     echo "::error file=$PRIVATE_SECURITY_WORKFLOW::Missing private security contract: $contract"
     exit 1
   fi
 done
+
+# Semgrep solo puede ser diff-aware en pull_request y merge_group. En push, cron
+# y dispatch tiene que escanear el arbol completo: es el unico sitio donde se ve
+# un hallazgo que ya estaba en la rama por defecto (el contrato de arriba exige
+# que el resto de eventos caiga a `baseline=''`). Y la base solo se usa si
+# existe en el clon; si no, se escanea todo en lugar de nada.
+semgrep_baselines=$(grep -n -- '--baseline-commit' <<< "$private_security_source" | grep -Ev '^[0-9]+: *#' || true)
+if [[ "$(grep -c . <<< "$semgrep_baselines")" -ne 1 ]] \
+  || ! grep -Fq 'baseline_args=(--baseline-commit "$baseline")' <<< "$semgrep_baselines" \
+  || ! grep -Fq 'git cat-file -e "${baseline}^{commit}"' <<< "$private_security_source"; then
+  echo "::error file=$PRIVATE_SECURITY_WORKFLOW::Semgrep diff-aware debe limitarse a PR y merge queue, con la base verificada"
+  exit 1
+fi
 
 # Ningun reusable puede resolver a un runner de pago. Tres invariantes, todas
 # fail-closed, porque el fallo que las motiva era invisible: `lint-reusable.yml`

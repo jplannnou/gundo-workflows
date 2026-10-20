@@ -435,10 +435,37 @@ jobs:
         env:
           SAST_SEVERITY: ${{ inputs.sast-severity }}
           SAST_MIN_CONFIDENCE: ${{ inputs.sast-min-confidence }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
 
           report="${RUNNER_TEMP}/semgrep-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+
+          # Diff-aware en PR y merge queue, igual que Gitleaks arriba: Semgrep solo
+          # analiza los archivos que cambian respecto a la base y solo informa de
+          # los hallazgos que la base no tenia. Un hallazgo nuevo sigue bloqueando
+          # el PR. Lo que ya estaba en la rama por defecto lo sigue viendo el scan
+          # completo de push, cron y dispatch, que no cambia.
+          # El arbol completo costaba 73-127 s por run en cada push a un PR, y el
+          # caller de mastra-nutritional-plan-ai se ejecuto 956 veces en 7 dias
+          # (medido el 20-oct-2026).
+          baseline_args=()
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) baseline="$PR_BASE_SHA" ;;
+            merge_group) baseline="$MERGE_GROUP_BASE_SHA" ;;
+            *) baseline='' ;;
+          esac
+          if [[ -n "$baseline" ]]; then
+            if git cat-file -e "${baseline}^{commit}" 2>/dev/null; then
+              baseline_args=(--baseline-commit "$baseline")
+              echo "Semgrep diff-aware: solo hallazgos nuevos respecto a ${baseline}."
+            else
+              # Ante la duda, mas cobertura: la base no esta en el clon, asi que
+              # se escanea el arbol completo en lugar de no escanear.
+              echo "::warning::La base ${baseline} no esta en el checkout; Semgrep escanea el arbol completo."
+            fi
+          fi
 
           # Semgrep exits non-zero on findings; the verdict is computed below from
           # the report instead, so a clean run must not abort the step here.
@@ -449,6 +476,7 @@ jobs:
             --exclude node_modules --exclude dist --exclude build \
             --exclude coverage --exclude .next --exclude .git \
             --exclude '*.min.js' \
+            ${baseline_args[@]+"${baseline_args[@]}"} \
             --json --output "$report" \
             . || true
 
