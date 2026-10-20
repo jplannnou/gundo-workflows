@@ -51,6 +51,9 @@ mutations=(
   "skip_install a false|reusable-deploy-firebase.yml|skip_install: true|skip_install: false|setup-gcloud sin skip_install: true"
   "vuelve sigstore/cosign-installer|reusable-build-sign.yml|- name: Install Cosign|- uses: sigstore/cosign-installer@v3|Descarga fragil de raw.githubusercontent.com"
   "cosign desde raw.githubusercontent.com|reusable-deploy-cloudrun.yml|https://github.com/sigstore/cosign/releases/download/|https://raw.githubusercontent.com/sigstore/cosign/|Descarga fragil de raw.githubusercontent.com"
+  "semgrep diff-aware tambien en push|reusable-private-security.yml|*) baseline='' ;;|*) baseline=\"\$GITHUB_SHA\" ;;|Missing private security contract"
+  "semgrep sin verificar la base|reusable-private-security.yml|git cat-file -e \"\${baseline}^{commit}\" 2>/dev/null|true|Semgrep diff-aware debe limitarse"
+  "segundo --baseline-commit fijo|reusable-private-security.yml|--exclude '*.min.js' \\|--exclude '*.min.js' --baseline-commit HEAD~1 \\|Semgrep diff-aware debe limitarse"
 )
 
 for mutation in "${mutations[@]}"; do
