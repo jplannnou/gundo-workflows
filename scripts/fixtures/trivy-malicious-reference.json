@@ -1,0 +1,23 @@
+{
+  "SchemaVersion": 2,
+  "Results": [
+    {
+      "Target": "package-lock.json",
+      "Class": "lang-pkgs",
+      "Type": "npm",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2026-93687?redirect=https://evil.test",
+          "PkgName": "braces",
+          "Severity": "HIGH"
+        },
+        {
+          "VulnerabilityID": "unknown-advisory",
+          "PkgName": "braces",
+          "Severity": "HIGH",
+          "References": ["https://evil.test/advisories/GHSA-vfj7-8cjw-p6xm"]
+        }
+      ]
+    }
+  ]
+}

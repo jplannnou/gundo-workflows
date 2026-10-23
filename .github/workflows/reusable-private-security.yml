@@ -94,6 +94,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check out gundo-workflows security gate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: jplannnou/gundo-workflows
+          ref: v1
+          path: .gundo-workflows
+          persist-credentials: false
+
       - name: Install verified Trivy with retry
         timeout-minutes: 12
         shell: bash
@@ -370,15 +378,20 @@ jobs:
           # refreshes can leave metadata.json empty (EOF). Never reuse that
           # mutable database across jobs or trust an interrupted older copy.
           cache_dir="$(mktemp -d "${RUNNER_TEMP}/gundo-trivy-db-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
-          trap 'rm -rf -- "$cache_dir"' EXIT
+          report="${RUNNER_TEMP}/gundo-trivy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          trap 'rm -rf -- "$cache_dir"; rm -f -- "$report"' EXIT
           echo "Trivy severity floor for ${GITHUB_EVENT_NAME}: ${TRIVY_SEVERITY}"
+          # The checked-out gate is trusted tooling, not caller source. Keep
+          # the consumer tree coverage intact while preventing duplicate scans.
           trivy fs \
             --cache-dir "$cache_dir" \
-            --scanners vuln,misconfig \
+            --scanners vuln,misconfig,secret \
             --include-dev-deps \
             --severity "$TRIVY_SEVERITY" \
             --ignore-unfixed \
-            --exit-code 1 \
+            --format json \
+            --output "$report" \
+            --exit-code 0 \
             --no-progress \
             --skip-dirs .git \
             --skip-dirs node_modules \
@@ -386,25 +399,11 @@ jobs:
             --skip-dirs build \
             --skip-dirs coverage \
             --skip-dirs .next \
+            --skip-dirs .gundo-workflows \
             .
-
-      - name: Scan current files for secrets
-        id: current-secrets
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          trivy fs \
-            --scanners secret \
-            --exit-code 1 \
-            --no-progress \
-            --skip-dirs .git \
-            --skip-dirs node_modules \
-            --skip-dirs dist \
-            --skip-dirs build \
-            --skip-dirs coverage \
-            --skip-dirs .next \
-            .
+          node .gundo-workflows/scripts/gate-trivy-report.mjs \
+            --report "$report" \
+            --severity "$TRIVY_SEVERITY"
 
       - name: Scan Git history for secrets
         id: history-secrets
@@ -474,7 +473,7 @@ jobs:
             --config p/default \
             --config p/secrets \
             --exclude node_modules --exclude dist --exclude build \
-            --exclude coverage --exclude .next --exclude .git \
+            --exclude coverage --exclude .next --exclude .git --exclude .gundo-workflows \
             --exclude '*.min.js' \
             ${baseline_args[@]+"${baseline_args[@]}"} \
             --json --output "$report" \
@@ -533,7 +532,6 @@ jobs:
         if: >-
           always() && inputs.notify-on-failure &&
           (steps.dependencies.outcome == 'failure' ||
-          steps.current-secrets.outcome == 'failure' ||
           steps.history-secrets.outcome == 'failure' ||
           steps.sast.outcome == 'failure')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -541,7 +539,6 @@ jobs:
           script: |
             const outcomes = {
               'Dependencias o configuración': '${{ steps.dependencies.outcome }}',
-              'Secretos en archivos actuales': '${{ steps.current-secrets.outcome }}',
               'Secretos en el historial Git': '${{ steps.history-secrets.outcome }}',
               'Código vulnerable (Semgrep)': '${{ steps.sast.outcome }}',
             };
@@ -590,7 +587,6 @@ jobs:
         if: >-
           always() &&
           (steps.dependencies.outcome == 'failure' ||
-          steps.current-secrets.outcome == 'failure' ||
           steps.history-secrets.outcome == 'failure' ||
           steps.sast.outcome == 'failure')
         shell: bash
