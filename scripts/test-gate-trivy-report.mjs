@@ -57,6 +57,13 @@ test("sanitized Trivy 0.74 secret and config result shapes remain blocking", asy
   assert.equal(config.blocking, 1);
 });
 
+test("filtered Trivy 0.74 secret target may omit Secrets after severity filtering", async () => {
+  const clean = await evaluateTrivyReport(await readFixture("trivy-v074-filtered-secret-clean-sanitized.json"), { severity: "HIGH,CRITICAL" });
+  const explicitEmpty = await evaluateTrivyReport(report([{ Target: "deploy.sh", Class: "secret", Secrets: [] }]), { severity: "HIGH,CRITICAL" });
+  assert.equal(clean.blocking, 0);
+  assert.equal(explicitEmpty.blocking, 0);
+});
+
 test("sanitized Trivy 0.74 clean config omits findings without becoming schema failure", async () => {
   const clean = await evaluateTrivyReport(await readFixture("trivy-v074-config-clean-sanitized.json"), { severity: "HIGH,CRITICAL" });
   assert.equal(clean.blocking, 0);
@@ -113,13 +120,31 @@ test("class-specific primary fields reject missing identifiers and incoherent ar
     report([{ Target: "deploy.sh", Class: "secret", Secrets: [{ Severity: "LOW" }] }]),
     report([{ Target: "Dockerfile", Class: "config", Type: "dockerfile", Misconfigurations: [{ Severity: "LOW", Status: "FAIL" }] }]),
     report([{ Target: "package-lock.json", Class: "evil", Type: "npm", Vulnerabilities: [] }]),
-    report([{ Target: "deploy.sh", Class: "secret" }]),
     report([{ Target: "deploy.sh", Class: "secret", Secrets: [], Vulnerabilities: [] }]),
     report([{ Target: "Dockerfile", Class: "config", Type: "dockerfile", Secrets: [] }]),
     report([{ Target: "package-lock.json", Class: "lang-pkgs", Type: "npm", Secrets: [] }]),
     report([{ Target: "", Class: "lang-pkgs", Type: "npm", Vulnerabilities: [] }]),
   ];
   for (const input of invalid) await assert.rejects(evaluateTrivyReport(input, { severity: "HIGH,CRITICAL" }));
+});
+
+test("only lang-pkgs npm advisories may query withdrawal metadata", async () => {
+  const requested = [];
+  const osNpm = report([{
+    Target: "os-packages", Class: "os-pkgs", Type: "npm",
+    Vulnerabilities: [vulnerability({ id: "CVE-2026-93687", packageName: "braces" })],
+  }]);
+  const result = await evaluateTrivyReport(osNpm, { severity: "HIGH,CRITICAL", fetchImpl: fixtureFetch({ braces: withdrawnBraces }, requested) });
+  assert.equal(result.blocking, 1);
+  assert.deepEqual(requested, []);
+});
+
+test("MisconfSummary must agree with all reported failing misconfigurations", async () => {
+  const corrupt = report([{
+    Target: "Dockerfile", Class: "config", Type: "dockerfile",
+    MisconfSummary: { Successes: 0, Failures: 1 },
+  }]);
+  await assert.rejects(evaluateTrivyReport(corrupt, { severity: "HIGH,CRITICAL" }));
 });
 
 test("a GHSA finding must match the returned GHSA even when a different reference is present", async () => {

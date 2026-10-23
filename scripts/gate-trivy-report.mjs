@@ -131,6 +131,14 @@ function validateSecret(finding) {
   return severity;
 }
 
+function validateMisconfigurationSummary(summary, findings) {
+  if (!isRecord(summary) || !Number.isInteger(summary.Successes) || summary.Successes < 0 ||
+      !Number.isInteger(summary.Failures) || summary.Failures < 0 ||
+      summary.Failures !== findings.length) {
+    throw new Error("unrecognized-trivy-misconfiguration-summary");
+  }
+}
+
 /**
  * Evaluate a Trivy filesystem JSON report. The injected fetch is test-only;
  * the CLI below always supplies the platform fetch and the fixed API origin.
@@ -158,7 +166,9 @@ export async function evaluateTrivyReport(report, { severity, fetchImpl = fetch 
     const hasSecrets = result.Secrets !== undefined;
     const hasMisconfigurations = result.Misconfigurations !== undefined;
     if (result.Class === "secret") {
-      if (!hasSecrets || hasVulnerabilities || hasMisconfigurations) throw new Error("unrecognized-trivy-secret-result");
+      // Severity filtering runs before JSON writing. A clean secret target can
+      // therefore retain its Target/Class while omitting Secrets altogether.
+      if (hasVulnerabilities || hasMisconfigurations) throw new Error("unrecognized-trivy-secret-result");
     } else if (result.Class === "config") {
       if (hasSecrets || hasVulnerabilities) throw new Error("unrecognized-trivy-config-result");
     } else if (hasSecrets || hasMisconfigurations) {
@@ -166,6 +176,10 @@ export async function evaluateTrivyReport(report, { severity, fetchImpl = fetch 
     }
     if (result.Class !== "secret" && (typeof result.Type !== "string" || !result.Type)) {
       throw new Error("unrecognized-trivy-result");
+    }
+    if (result.MisconfSummary !== undefined) {
+      if (result.Class !== "config") throw new Error("unrecognized-trivy-misconfiguration-summary");
+      validateMisconfigurationSummary(result.MisconfSummary, result.Misconfigurations ?? []);
     }
     for (const secret of result.Secrets ?? []) {
       if (floor.has(validateSecret(secret))) secrets += 1;
@@ -179,7 +193,7 @@ export async function evaluateTrivyReport(report, { severity, fetchImpl = fetch 
       const severity = validateVulnerability(finding);
       if (!floor.has(severity)) continue;
       const id = finding.VulnerabilityID;
-      if (result.Type !== "npm") {
+      if (result.Class !== "lang-pkgs" || result.Type !== "npm") {
         retained.push(id);
         continue;
       }
