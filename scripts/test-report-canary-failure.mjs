@@ -104,6 +104,29 @@ test("creates one labelled issue when no exact open issue exists", async () => {
   );
 });
 
+test("retries without the optional label only after GitHub rejects the first create", async () => {
+  const requests = [];
+  const result = await reportCanaryFailure({
+    env: environment(),
+    fetchImpl: fakeFetch(
+      [
+        { body: { items: [] } },
+        { status: 422, body: { message: "Validation Failed" } },
+        { body: { number: 73 } },
+      ],
+      requests,
+    ),
+    log: () => {},
+  });
+
+  assert.deepEqual(result, { action: "created", issueNumber: 73 });
+  assert.equal(requests.length, 3);
+  assert.deepEqual(JSON.parse(requests[1].options.body).labels, [
+    "deploy-failed",
+  ]);
+  assert.equal(JSON.parse(requests[2].options.body).labels, undefined);
+});
+
 test("an API error propagates and never reports a false success", async () => {
   await assert.rejects(
     reportCanaryFailure({
@@ -116,6 +139,27 @@ test("an API error propagates and never reports a false success", async () => {
     }),
     /searching the existing deployment-failure issue: GitHub API returned HTTP 403/,
   );
+});
+
+test("does not retry an ambiguous issue creation failure", async () => {
+  for (const failure of [
+    { status: 500, body: { message: "upstream failure" } },
+    new Error("connection reset after submission"),
+  ]) {
+    const requests = [];
+    await assert.rejects(
+      reportCanaryFailure({
+        env: environment(),
+        fetchImpl: fakeFetch([{ body: { items: [] } }, failure], requests),
+        log: () => assert.fail("must not report success"),
+      }),
+    );
+    assert.equal(
+      requests.length,
+      2,
+      "must not create a duplicate issue on retry",
+    );
+  }
 });
 
 test("network failure propagates without disclosing the request URL or token", async () => {

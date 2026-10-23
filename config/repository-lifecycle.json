@@ -50,6 +50,7 @@
     { "repo": "jplannnou/gundo-products-v2", "state": "ACTIVE", "reason": "Nueva generacion del pipeline de productos." },
     { "repo": "jplannnou/gundo-screens", "state": "ACTIVE", "reason": "Capturador visual compartido." },
     { "repo": "jplannnou/gundo-vida", "state": "SUNSET", "reason": "Migration only: seguridad critica, exportacion, borrado y redirect final." },
+    { "repo": "jplannnou/gundo-workflows", "state": "ACTIVE", "reason": "Infraestructura CI/CD compartida; Engine consume sus despliegues reutilizables @v1, verificado en GitHub el 2026-10-23." },
     { "repo": "jplannnou/iatra", "state": "ACTIVE", "reason": "Producto clinico activo." },
     { "repo": "jplannnou/jp-assistant", "state": "ACTIVE", "reason": "Asistente personal activo." }
   ]

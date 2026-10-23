@@ -62,9 +62,11 @@ Cerrar este issue cuando el deploy vuelva a promover.`;
 async function responseJson(response, context) {
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(
+    const error = new Error(
       `[canary-failure-reporter] ${context}: GitHub API returned HTTP ${response.status}`,
     );
+    error.githubStatus = response.status;
+    throw error;
   }
   if (text === "") return null;
   try {
@@ -150,18 +152,32 @@ export async function reportCanaryFailure({
     return { action: "commented", issueNumber: existing.number };
   }
 
-  const issue = await githubJson(
-    fetchImpl,
-    token,
-    `/repos/${notification.repository}/issues`,
-    "POST",
-    {
-      body: notification.body,
-      labels: ["deploy-failed"],
-      title: notification.title,
-    },
-    "creating the deployment-failure issue",
-  );
+  const issuePath = `/repos/${notification.repository}/issues`;
+  const issuePayload = { body: notification.body, title: notification.title };
+  let issue;
+  try {
+    issue = await githubJson(
+      fetchImpl,
+      token,
+      issuePath,
+      "POST",
+      { ...issuePayload, labels: ["deploy-failed"] },
+      "creating the deployment-failure issue",
+    );
+  } catch (error) {
+    // A 422 means GitHub rejected the first write, so it could not have created
+    // an issue. Preserve the previous reporter's missing-label fallback without
+    // retrying ambiguous transport or server failures, which could duplicate it.
+    if (error?.githubStatus !== 422) throw error;
+    issue = await githubJson(
+      fetchImpl,
+      token,
+      issuePath,
+      "POST",
+      issuePayload,
+      "creating the deployment-failure issue without its optional label",
+    );
+  }
   if (!issue?.number) {
     throw new Error(
       "[canary-failure-reporter] creating the deployment-failure issue: missing issue number",
