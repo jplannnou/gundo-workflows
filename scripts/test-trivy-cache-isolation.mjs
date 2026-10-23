@@ -29,7 +29,10 @@ const scan = block
   .split("        run: |\n")[1]
   .split("\n")
   .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
-  .join("\n");
+  .join("\n")
+  // This regression executes only Trivy's transport/cache contract. The gate
+  // itself has dedicated JSON fixtures and needs the shared checkout present.
+  .replace(/\nnode \.gundo-workflows\/scripts\/gate-trivy-report\.mjs[\s\S]*$/, "");
 
 // Execute the real Bash step. Only the external scanner is a fixture. Two
 // independent jobs share toolcache + temp roots and synchronize with files,
@@ -162,13 +165,13 @@ test("a scanner refusal is propagated and its private cache is removed", async (
   assert.deepEqual(x.removed, [true]);
   for (const flag of [
     "--scanners",
-    "vuln,misconfig",
+    "vuln,misconfig,secret",
     "--include-dev-deps",
     "--severity",
     "HIGH,CRITICAL",
     "--ignore-unfixed",
     "--exit-code",
-    "1",
+    "0",
   ])
     assert(x.args[0].includes(flag), flag);
 });
