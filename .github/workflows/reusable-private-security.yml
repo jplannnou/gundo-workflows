@@ -381,6 +381,8 @@ jobs:
           report="${RUNNER_TEMP}/gundo-trivy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           trap 'rm -rf -- "$cache_dir"; rm -f -- "$report"' EXIT
           echo "Trivy severity floor for ${GITHUB_EVENT_NAME}: ${TRIVY_SEVERITY}"
+          # The checked-out gate is trusted tooling, not caller source. Keep
+          # the consumer tree coverage intact while preventing duplicate scans.
           trivy fs \
             --cache-dir "$cache_dir" \
             --scanners vuln,misconfig,secret \
@@ -397,6 +399,7 @@ jobs:
             --skip-dirs build \
             --skip-dirs coverage \
             --skip-dirs .next \
+            --skip-dirs .gundo-workflows \
             .
           node .gundo-workflows/scripts/gate-trivy-report.mjs \
             --report "$report" \
@@ -470,7 +473,7 @@ jobs:
             --config p/default \
             --config p/secrets \
             --exclude node_modules --exclude dist --exclude build \
-            --exclude coverage --exclude .next --exclude .git \
+            --exclude coverage --exclude .next --exclude .git --exclude .gundo-workflows \
             --exclude '*.min.js' \
             ${baseline_args[@]+"${baseline_args[@]}"} \
             --json --output "$report" \

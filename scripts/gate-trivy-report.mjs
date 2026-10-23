@@ -8,6 +8,8 @@ const ADVISORY_REFERENCE = new RegExp(
   "^https://github\\.com/advisories/(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4})$",
 );
 const BLOCKING_SEVERITIES = new Set(["HIGH", "CRITICAL"]);
+const RECOGNIZED_SEVERITIES = new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
+const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -31,6 +33,9 @@ function candidateFromFinding(finding) {
   if (typeof finding.VulnerabilityID === "string" && CVE.test(finding.VulnerabilityID)) {
     return { kind: "cve", value: finding.VulnerabilityID };
   }
+  if (typeof finding.VulnerabilityID === "string" && GHSA.test(finding.VulnerabilityID)) {
+    return { kind: "ghsa", value: finding.VulnerabilityID };
+  }
   if (!Array.isArray(finding.References)) return null;
   for (const reference of finding.References) {
     if (typeof reference !== "string") continue;
@@ -42,14 +47,22 @@ function candidateFromFinding(finding) {
 
 function advisoryMatches({ advisory, candidate, packageName }) {
   if (!isRecord(advisory) || typeof packageName !== "string" || !packageName) return false;
-  if (typeof advisory.withdrawn_at !== "string" || Number.isNaN(Date.parse(advisory.withdrawn_at))) return false;
+  if (!validWithdrawalTimestamp(advisory.withdrawn_at)) return false;
   if (!GHSA.test(advisory.ghsa_id ?? "") || !CVE.test(advisory.cve_id ?? "")) return false;
   if (candidate.kind === "cve" && advisory.cve_id !== candidate.value) return false;
   if (candidate.kind === "ghsa" && advisory.ghsa_id !== candidate.value) return false;
   if (!Array.isArray(advisory.vulnerabilities)) return false;
   return advisory.vulnerabilities.some(
-    (item) => isRecord(item) && item.ecosystem === "npm" && item.package?.name === packageName,
+    (item) => isRecord(item) && item.package?.ecosystem === "npm" && item.package?.name === packageName,
   );
+}
+
+function validWithdrawalTimestamp(value) {
+  if (typeof value !== "string" || !RFC3339_UTC.test(value)) return false;
+  const epoch = Date.parse(value);
+  if (Number.isNaN(epoch) || epoch > Date.now()) return false;
+  const canonical = value.includes(".") ? value : value.replace("Z", ".000Z");
+  return new Date(epoch).toISOString() === canonical;
 }
 
 async function fetchJson(url, fetchImpl) {
@@ -76,8 +89,34 @@ async function lookupAdvisory(candidate, fetchImpl) {
   return matched[0];
 }
 
-function blocking(entry, floor) {
-  return isRecord(entry) && typeof entry.Severity === "string" && floor.has(entry.Severity.toUpperCase());
+function recognizedSeverity(entry) {
+  if (!isRecord(entry) || typeof entry.Severity !== "string") throw new Error("unrecognized-trivy-finding");
+  const severity = entry.Severity.toUpperCase();
+  // UNKNOWN cannot establish that a result is safe at a HIGH/CRITICAL floor.
+  if (!RECOGNIZED_SEVERITIES.has(severity)) throw new Error("unrecognized-trivy-severity");
+  return severity;
+}
+
+function validateVulnerability(finding) {
+  const severity = recognizedSeverity(finding);
+  if (typeof finding.VulnerabilityID !== "string" || !safeId(finding.VulnerabilityID) ||
+      typeof finding.PkgName !== "string" || !finding.PkgName) {
+    throw new Error("unrecognized-trivy-vulnerability");
+  }
+  if (finding.References !== undefined && !Array.isArray(finding.References)) {
+    throw new Error("unrecognized-trivy-vulnerability");
+  }
+  return severity;
+}
+
+function validateMisconfiguration(finding) {
+  const severity = recognizedSeverity(finding);
+  // Trivy's filesystem JSON only emits failing misconfigurations. A PASS or
+  // unknown status here is not a clean result; it is an unexpected schema.
+  if (finding.Status !== "FAIL") {
+    throw new Error("unrecognized-trivy-misconfiguration");
+  }
+  return severity;
 }
 
 /**
@@ -95,18 +134,23 @@ export async function evaluateTrivyReport(report, { severity, fetchImpl = fetch 
 
   for (const result of report.Results) {
     if (!isRecord(result)) throw new Error("unrecognized-trivy-result");
+    if (typeof result.Type !== "string" || !result.Type) throw new Error("unrecognized-trivy-result");
     for (const key of ["Vulnerabilities", "Secrets", "Misconfigurations"]) {
       if (result[key] !== undefined && !Array.isArray(result[key])) throw new Error("unrecognized-trivy-result");
     }
-    for (const secret of result.Secrets ?? []) if (blocking(secret, floor)) secrets += 1;
-    for (const misconfiguration of result.Misconfigurations ?? []) if (blocking(misconfiguration, floor)) misconfigurations += 1;
+    for (const secret of result.Secrets ?? []) {
+      if (floor.has(recognizedSeverity(secret))) secrets += 1;
+    }
+    for (const misconfiguration of result.Misconfigurations ?? []) {
+      const severity = validateMisconfiguration(misconfiguration);
+      if (floor.has(severity)) misconfigurations += 1;
+    }
 
     for (const finding of result.Vulnerabilities ?? []) {
-      if (!blocking(finding, floor)) continue;
-      const id = typeof finding?.VulnerabilityID === "string" && safeId(finding.VulnerabilityID)
-        ? finding.VulnerabilityID
-        : "unrecognized-vulnerability";
-      if (result.Type !== "npm" || typeof finding?.PkgName !== "string") {
+      const severity = validateVulnerability(finding);
+      if (!floor.has(severity)) continue;
+      const id = finding.VulnerabilityID;
+      if (result.Type !== "npm") {
         retained.push(id);
         continue;
       }

@@ -5,13 +5,9 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { evaluateTrivyReport } from "./gate-trivy-report.mjs";
 
-const withdrawnBraces = {
-  ghsa_id: "GHSA-vfj7-8cjw-p6xm", cve_id: "CVE-2026-93687", withdrawn_at: "2026-10-23T12:53:02Z",
-  vulnerabilities: [{ ecosystem: "npm", package: { name: "braces" } }],
-};
 const activeNodeForge = {
   ghsa_id: "GHSA-86w9-cpqp-85rv", cve_id: "CVE-2026-85393", withdrawn_at: null,
-  vulnerabilities: [{ ecosystem: "npm", package: { name: "node-forge" } }],
+  vulnerabilities: [{ package: { ecosystem: "npm", name: "node-forge" } }],
 };
 function vulnerability({ id, packageName, severity = "HIGH", references = [] }) {
   return { VulnerabilityID: id, PkgName: packageName, Severity: severity, References: references };
@@ -28,6 +24,7 @@ function fixtureFetch(records, requested) {
 async function readFixture(name) {
   return JSON.parse(await readFile(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 }
+const withdrawnBraces = await readFixture("github-advisory-braces-withdrawn.json");
 
 test("withdrawn npm advisory is suppressed while active node-forge remains blocking", async () => {
   const requested = [];
@@ -53,10 +50,9 @@ test("secrets and misconfigurations remain blocking without advisory lookups", a
   assert.deepEqual(requested, []);
 });
 
-test("malicious identifiers and references never select an external request", async () => {
+test("malicious identifiers and references fail closed without an external request", async () => {
   const requested = [];
-  const result = await evaluateTrivyReport(await readFixture("trivy-malicious-reference.json"), { severity: "HIGH,CRITICAL", fetchImpl: fixtureFetch({}, requested) });
-  assert.equal(result.blocking, 2);
+  await assert.rejects(evaluateTrivyReport(await readFixture("trivy-malicious-reference.json"), { severity: "HIGH,CRITICAL", fetchImpl: fixtureFetch({}, requested) }));
   assert.deepEqual(requested, []);
 });
 
@@ -68,11 +64,52 @@ test("API errors and malformed metadata retain the finding", async () => {
   assert.equal(malformed.blocking, 1);
 });
 
+test("withdrawal timestamp must be canonical past RFC3339 UTC", async () => {
+  const finding = await readFixture("trivy-withdrawn-only.json");
+  for (const withdrawn_at of ["0", "2026-02-30T12:53:02Z", "2999-01-01T00:00:00Z"]) {
+    const result = await evaluateTrivyReport(finding, {
+      severity: "HIGH,CRITICAL",
+      fetchImpl: fixtureFetch({ braces: { ...withdrawnBraces, withdrawn_at } }, []),
+    });
+    assert.equal(result.blocking, 1, withdrawn_at);
+  }
+});
+
+test("unknown or malformed Trivy findings fail closed", async () => {
+  for (const invalid of [
+    { Results: [{}] },
+    report([npm([null])]),
+    report([{ Type: "npm", Secrets: [{ Severity: "UNKNOWN" }] }]),
+    report([{ Type: "filesystem", Misconfigurations: [{ Severity: "HIGH" }] }]),
+  ]) {
+    await assert.rejects(evaluateTrivyReport(invalid, { severity: "HIGH,CRITICAL", fetchImpl: async () => { throw new Error("must-not-fetch"); } }));
+  }
+});
+
+test("Trivy PASS misconfiguration is schema failure; reported FAIL remains blocking", async () => {
+  const base = { Type: "filesystem", Misconfigurations: [{ Severity: "HIGH", Status: "PASS" }] };
+  const failed = await evaluateTrivyReport(report([{ ...base, Misconfigurations: [{ Severity: "HIGH", Status: "FAIL" }] }]), { severity: "HIGH,CRITICAL" });
+  await assert.rejects(evaluateTrivyReport(report([base]), { severity: "HIGH,CRITICAL" }));
+  assert.equal(failed.blocking, 1);
+});
+
+test("a GHSA finding must match the returned GHSA even when a different reference is present", async () => {
+  const requested = [];
+  const result = await evaluateTrivyReport(report([npm([vulnerability({
+    id: "GHSA-86w9-cpqp-85rv", packageName: "braces", references: ["https://github.com/advisories/GHSA-vfj7-8cjw-p6xm"],
+  })])]), { severity: "HIGH,CRITICAL", fetchImpl: fixtureFetch({ braces: withdrawnBraces }, requested) });
+  assert.equal(result.blocking, 1);
+  assert.deepEqual(result.retained, ["GHSA-86w9-cpqp-85rv"]);
+  assert.match(requested[0], /GHSA-86w9-cpqp-85rv$/);
+});
+
 test("workflow runs Trivy JSON gate and retains scanner transport failures", async () => {
   const workflow = await readFile(new URL("../.github/workflows/reusable-private-security.yml", import.meta.url), "utf8");
   assert.match(workflow, /--format json/);
   assert.match(workflow, /--exit-code 0/);
   assert.match(workflow, /node \.gundo-workflows\/scripts\/gate-trivy-report\.mjs/);
+  assert.match(workflow, /--skip-dirs \.gundo-workflows/);
+  assert.match(workflow, /--exclude \.gundo-workflows/);
   assert.doesNotMatch(workflow, /Scan current files for secrets/);
 });
 

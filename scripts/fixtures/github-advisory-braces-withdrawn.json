@@ -1,0 +1,10 @@
+{
+  "ghsa_id": "GHSA-vfj7-8cjw-p6xm",
+  "cve_id": "CVE-2026-93687",
+  "withdrawn_at": "2026-10-23T12:53:02Z",
+  "vulnerabilities": [
+    {
+      "package": { "ecosystem": "npm", "name": "braces" }
+    }
+  ]
+}
