@@ -2,6 +2,7 @@
   "SchemaVersion": 2,
   "Results": [
     {
+      "Target": "package-lock.json",
       "Class": "lang-pkgs",
       "Type": "npm",
       "Vulnerabilities": [

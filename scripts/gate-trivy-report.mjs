@@ -9,6 +9,7 @@ const ADVISORY_REFERENCE = new RegExp(
 );
 const BLOCKING_SEVERITIES = new Set(["HIGH", "CRITICAL"]);
 const RECOGNIZED_SEVERITIES = new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
+const RESULT_CLASSES = new Set(["os-pkgs", "lang-pkgs", "config", "secret"]);
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
 function isRecord(value) {
@@ -116,6 +117,17 @@ function validateMisconfiguration(finding) {
   if (finding.Status !== "FAIL") {
     throw new Error("unrecognized-trivy-misconfiguration");
   }
+  if (typeof finding.ID !== "string" || !finding.ID) {
+    throw new Error("unrecognized-trivy-misconfiguration");
+  }
+  return severity;
+}
+
+function validateSecret(finding) {
+  const severity = recognizedSeverity(finding);
+  if (typeof finding.RuleID !== "string" || !finding.RuleID) {
+    throw new Error("unrecognized-trivy-secret");
+  }
   return severity;
 }
 
@@ -136,21 +148,27 @@ export async function evaluateTrivyReport(report, { severity, fetchImpl = fetch 
 
   for (const result of report.Results) {
     if (!isRecord(result)) throw new Error("unrecognized-trivy-result");
-    if (typeof result.Class !== "string" || !result.Class) throw new Error("unrecognized-trivy-result");
+    if (typeof result.Target !== "string" || !result.Target || !RESULT_CLASSES.has(result.Class)) {
+      throw new Error("unrecognized-trivy-result");
+    }
     for (const key of ["Vulnerabilities", "Secrets", "Misconfigurations"]) {
       if (result[key] !== undefined && !Array.isArray(result[key])) throw new Error("unrecognized-trivy-result");
     }
     const hasVulnerabilities = result.Vulnerabilities !== undefined;
     const hasSecrets = result.Secrets !== undefined;
     const hasMisconfigurations = result.Misconfigurations !== undefined;
-    if (hasSecrets && result.Class !== "secret") throw new Error("unrecognized-trivy-secret-result");
-    if (hasMisconfigurations && result.Class !== "config") throw new Error("unrecognized-trivy-config-result");
-    if ((hasVulnerabilities || hasMisconfigurations || result.Class !== "secret") &&
-        (typeof result.Type !== "string" || !result.Type)) {
+    if (result.Class === "secret") {
+      if (!hasSecrets || hasVulnerabilities || hasMisconfigurations) throw new Error("unrecognized-trivy-secret-result");
+    } else if (result.Class === "config") {
+      if (hasSecrets || hasVulnerabilities) throw new Error("unrecognized-trivy-config-result");
+    } else if (hasSecrets || hasMisconfigurations) {
+      throw new Error("unrecognized-trivy-package-result");
+    }
+    if (result.Class !== "secret" && (typeof result.Type !== "string" || !result.Type)) {
       throw new Error("unrecognized-trivy-result");
     }
     for (const secret of result.Secrets ?? []) {
-      if (floor.has(recognizedSeverity(secret))) secrets += 1;
+      if (floor.has(validateSecret(secret))) secrets += 1;
     }
     for (const misconfiguration of result.Misconfigurations ?? []) {
       const severity = validateMisconfiguration(misconfiguration);

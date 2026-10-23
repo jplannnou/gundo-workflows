@@ -13,7 +13,7 @@ function vulnerability({ id, packageName, severity = "HIGH", references = [] }) 
   return { VulnerabilityID: id, PkgName: packageName, Severity: severity, References: references };
 }
 function report(results) { return { SchemaVersion: 2, Results: results }; }
-function npm(vulnerabilities, extras = {}) { return { Class: "lang-pkgs", Type: "npm", Vulnerabilities: vulnerabilities, ...extras }; }
+function npm(vulnerabilities, extras = {}) { return { Target: "package-lock.json", Class: "lang-pkgs", Type: "npm", Vulnerabilities: vulnerabilities, ...extras }; }
 function fixtureFetch(records, requested) {
   return async (url) => {
     requested.push(url);
@@ -57,6 +57,11 @@ test("sanitized Trivy 0.74 secret and config result shapes remain blocking", asy
   assert.equal(config.blocking, 1);
 });
 
+test("sanitized Trivy 0.74 clean config omits findings without becoming schema failure", async () => {
+  const clean = await evaluateTrivyReport(await readFixture("trivy-v074-config-clean-sanitized.json"), { severity: "HIGH,CRITICAL" });
+  assert.equal(clean.blocking, 0);
+});
+
 test("malicious identifiers and references fail closed without an external request", async () => {
   const requested = [];
   await assert.rejects(evaluateTrivyReport(await readFixture("trivy-malicious-reference.json"), { severity: "HIGH,CRITICAL", fetchImpl: fixtureFetch({}, requested) }));
@@ -86,8 +91,8 @@ test("unknown or malformed Trivy findings fail closed", async () => {
   for (const invalid of [
     { SchemaVersion: 2, Results: [{}] },
     report([npm([null])]),
-    report([{ Class: "secret", Secrets: [{ RuleID: "fixture", Severity: "UNKNOWN" }] }]),
-    report([{ Class: "config", Type: "dockerfile", Misconfigurations: [{ Severity: "HIGH" }] }]),
+    report([{ Target: "deploy.sh", Class: "secret", Secrets: [{ RuleID: "fixture", Severity: "UNKNOWN" }] }]),
+    report([{ Target: "Dockerfile", Class: "config", Type: "dockerfile", Misconfigurations: [{ Severity: "HIGH" }] }]),
     { SchemaVersion: 999, Results: [] },
     { SchemaVersion: "evil", Results: [] },
     { Results: [] },
@@ -97,10 +102,24 @@ test("unknown or malformed Trivy findings fail closed", async () => {
 });
 
 test("Trivy PASS misconfiguration is schema failure; reported FAIL remains blocking", async () => {
-  const base = { Class: "config", Type: "dockerfile", Misconfigurations: [{ Severity: "HIGH", Status: "PASS" }] };
-  const failed = await evaluateTrivyReport(report([{ ...base, Misconfigurations: [{ Severity: "HIGH", Status: "FAIL" }] }]), { severity: "HIGH,CRITICAL" });
+  const base = { Target: "Dockerfile", Class: "config", Type: "dockerfile", Misconfigurations: [{ ID: "DS-0002", Severity: "HIGH", Status: "PASS" }] };
+  const failed = await evaluateTrivyReport(report([{ ...base, Misconfigurations: [{ ID: "DS-0002", Severity: "HIGH", Status: "FAIL" }] }]), { severity: "HIGH,CRITICAL" });
   await assert.rejects(evaluateTrivyReport(report([base]), { severity: "HIGH,CRITICAL" }));
   assert.equal(failed.blocking, 1);
+});
+
+test("class-specific primary fields reject missing identifiers and incoherent arrays", async () => {
+  const invalid = [
+    report([{ Target: "deploy.sh", Class: "secret", Secrets: [{ Severity: "LOW" }] }]),
+    report([{ Target: "Dockerfile", Class: "config", Type: "dockerfile", Misconfigurations: [{ Severity: "LOW", Status: "FAIL" }] }]),
+    report([{ Target: "package-lock.json", Class: "evil", Type: "npm", Vulnerabilities: [] }]),
+    report([{ Target: "deploy.sh", Class: "secret" }]),
+    report([{ Target: "deploy.sh", Class: "secret", Secrets: [], Vulnerabilities: [] }]),
+    report([{ Target: "Dockerfile", Class: "config", Type: "dockerfile", Secrets: [] }]),
+    report([{ Target: "package-lock.json", Class: "lang-pkgs", Type: "npm", Secrets: [] }]),
+    report([{ Target: "", Class: "lang-pkgs", Type: "npm", Vulnerabilities: [] }]),
+  ];
+  for (const input of invalid) await assert.rejects(evaluateTrivyReport(input, { severity: "HIGH,CRITICAL" }));
 });
 
 test("a GHSA finding must match the returned GHSA even when a different reference is present", async () => {

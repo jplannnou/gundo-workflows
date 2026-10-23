@@ -1,0 +1,16 @@
+{
+  "SchemaVersion": 2,
+  "Results": [
+    {
+      "Target": ".",
+      "Class": "config",
+      "Type": "terraform",
+      "MisconfSummary": { "Successes": 58, "Failures": 0 }
+    },
+    {
+      "Target": "module/main.tf",
+      "Class": "config",
+      "Type": "terraform"
+    }
+  ]
+}
