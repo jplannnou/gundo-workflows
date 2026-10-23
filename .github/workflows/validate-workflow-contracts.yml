@@ -18,6 +18,8 @@ jobs:
         run: bash scripts/validate-workflow-contracts.sh
       - name: Stage-only deployment contract
         run: node --test scripts/test-stage-only-deploy-contract.mjs
+      - name: Canary failure reporter contract
+        run: node --test scripts/test-report-canary-failure.mjs
       - name: Trivy installer offline regression and mutation tests
         run: node --test scripts/test-trivy-installer.mjs
       - name: Trivy database concurrent cache isolation
