@@ -1,0 +1,13 @@
+{
+  "SchemaVersion": 2,
+  "Results": [
+    {
+      "Target": "Dockerfile",
+      "Class": "config",
+      "Type": "dockerfile",
+      "Misconfigurations": [
+        { "ID": "DS-0002", "Severity": "HIGH", "Status": "FAIL" }
+      ]
+    }
+  ]
+}

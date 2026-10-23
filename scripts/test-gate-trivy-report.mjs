@@ -12,8 +12,8 @@ const activeNodeForge = {
 function vulnerability({ id, packageName, severity = "HIGH", references = [] }) {
   return { VulnerabilityID: id, PkgName: packageName, Severity: severity, References: references };
 }
-function report(results) { return { Results: results }; }
-function npm(vulnerabilities, extras = {}) { return { Type: "npm", Vulnerabilities: vulnerabilities, ...extras }; }
+function report(results) { return { SchemaVersion: 2, Results: results }; }
+function npm(vulnerabilities, extras = {}) { return { Class: "lang-pkgs", Type: "npm", Vulnerabilities: vulnerabilities, ...extras }; }
 function fixtureFetch(records, requested) {
   return async (url) => {
     requested.push(url);
@@ -50,6 +50,13 @@ test("secrets and misconfigurations remain blocking without advisory lookups", a
   assert.deepEqual(requested, []);
 });
 
+test("sanitized Trivy 0.74 secret and config result shapes remain blocking", async () => {
+  const secret = await evaluateTrivyReport(await readFixture("trivy-v074-secret-sanitized.json"), { severity: "HIGH,CRITICAL" });
+  const config = await evaluateTrivyReport(await readFixture("trivy-v074-config-sanitized.json"), { severity: "HIGH,CRITICAL" });
+  assert.equal(secret.blocking, 1);
+  assert.equal(config.blocking, 1);
+});
+
 test("malicious identifiers and references fail closed without an external request", async () => {
   const requested = [];
   await assert.rejects(evaluateTrivyReport(await readFixture("trivy-malicious-reference.json"), { severity: "HIGH,CRITICAL", fetchImpl: fixtureFetch({}, requested) }));
@@ -77,17 +84,20 @@ test("withdrawal timestamp must be canonical past RFC3339 UTC", async () => {
 
 test("unknown or malformed Trivy findings fail closed", async () => {
   for (const invalid of [
-    { Results: [{}] },
+    { SchemaVersion: 2, Results: [{}] },
     report([npm([null])]),
-    report([{ Type: "npm", Secrets: [{ Severity: "UNKNOWN" }] }]),
-    report([{ Type: "filesystem", Misconfigurations: [{ Severity: "HIGH" }] }]),
+    report([{ Class: "secret", Secrets: [{ RuleID: "fixture", Severity: "UNKNOWN" }] }]),
+    report([{ Class: "config", Type: "dockerfile", Misconfigurations: [{ Severity: "HIGH" }] }]),
+    { SchemaVersion: 999, Results: [] },
+    { SchemaVersion: "evil", Results: [] },
+    { Results: [] },
   ]) {
     await assert.rejects(evaluateTrivyReport(invalid, { severity: "HIGH,CRITICAL", fetchImpl: async () => { throw new Error("must-not-fetch"); } }));
   }
 });
 
 test("Trivy PASS misconfiguration is schema failure; reported FAIL remains blocking", async () => {
-  const base = { Type: "filesystem", Misconfigurations: [{ Severity: "HIGH", Status: "PASS" }] };
+  const base = { Class: "config", Type: "dockerfile", Misconfigurations: [{ Severity: "HIGH", Status: "PASS" }] };
   const failed = await evaluateTrivyReport(report([{ ...base, Misconfigurations: [{ Severity: "HIGH", Status: "FAIL" }] }]), { severity: "HIGH,CRITICAL" });
   await assert.rejects(evaluateTrivyReport(report([base]), { severity: "HIGH,CRITICAL" }));
   assert.equal(failed.blocking, 1);

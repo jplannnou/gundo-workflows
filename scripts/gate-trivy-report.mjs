@@ -125,7 +125,9 @@ function validateMisconfiguration(finding) {
  */
 export async function evaluateTrivyReport(report, { severity, fetchImpl = fetch } = {}) {
   const floor = severityFloor(severity);
-  if (!isRecord(report) || !Array.isArray(report.Results)) throw new Error("unrecognized-trivy-report");
+  if (!isRecord(report) || report.SchemaVersion !== 2 || !Array.isArray(report.Results)) {
+    throw new Error("unrecognized-trivy-report");
+  }
 
   const retained = [];
   const suppressed = [];
@@ -134,9 +136,18 @@ export async function evaluateTrivyReport(report, { severity, fetchImpl = fetch 
 
   for (const result of report.Results) {
     if (!isRecord(result)) throw new Error("unrecognized-trivy-result");
-    if (typeof result.Type !== "string" || !result.Type) throw new Error("unrecognized-trivy-result");
+    if (typeof result.Class !== "string" || !result.Class) throw new Error("unrecognized-trivy-result");
     for (const key of ["Vulnerabilities", "Secrets", "Misconfigurations"]) {
       if (result[key] !== undefined && !Array.isArray(result[key])) throw new Error("unrecognized-trivy-result");
+    }
+    const hasVulnerabilities = result.Vulnerabilities !== undefined;
+    const hasSecrets = result.Secrets !== undefined;
+    const hasMisconfigurations = result.Misconfigurations !== undefined;
+    if (hasSecrets && result.Class !== "secret") throw new Error("unrecognized-trivy-secret-result");
+    if (hasMisconfigurations && result.Class !== "config") throw new Error("unrecognized-trivy-config-result");
+    if ((hasVulnerabilities || hasMisconfigurations || result.Class !== "secret") &&
+        (typeof result.Type !== "string" || !result.Type)) {
+      throw new Error("unrecognized-trivy-result");
     }
     for (const secret of result.Secrets ?? []) {
       if (floor.has(recognizedSeverity(secret))) secrets += 1;
