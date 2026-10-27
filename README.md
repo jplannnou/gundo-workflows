@@ -80,9 +80,11 @@ See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the full setup (WIF provider, I
 
 `scripts/install-runner-docker-cache-guard.sh --dry-run` prints the exact hook,
 systemd drop-in and state files that would be installed. It performs no Docker
-operation. The cleaner remains deferred until every listed runner listener has
-been restarted while idle with `--apply --restart-idle-runners`; that command
-refuses if any `Runner.Worker` exists. The installer never drains queues,
+operation. The cleaner remains deferred until every listed listener has loaded
+the hook in its actual process environment. `--apply` only stages files. A
+separate `--apply --activate-idle-runners <token>` is allowed only after an
+external quiescence token confirms dispatch was stopped; it rechecks for a
+`Runner.Worker` before every stop and start. The installer never drains queues,
 restarts an active job, changes groups, or deletes containers, volumes or
 worktrees. It also never runs cache cleanup itself.
 
