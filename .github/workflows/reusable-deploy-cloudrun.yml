@@ -155,12 +155,19 @@ on:
       verify-signature:
         description: |
           Verify image with Cosign keyless OIDC before deploying. Default true.
-          Set false when the image was built outside `reusable-build-sign.yml`
-          (e.g. plain `gcloud builds submit` with no signing step). Tech debt:
-          consumers using Cloud Build should add a sign step and flip this back
-          to true.
+          Set false only while a legacy image producer has no signing step.
+          Tech debt: unsigned consumers must add a sign step and flip this back
+          to true; this workflow does not invent signer claims for opt-outs.
         type: boolean
         default: true
+      signature-mode:
+        description: |
+          Expected keyless signer. `caller-workflow` matches a signing step in
+          the caller itself. `reusable-build-sign` matches only this repository's
+          shared build workflow at refs/heads/v1. Ignored when verification is
+          explicitly disabled.
+        type: string
+        default: caller-workflow
       feedback-hub-url:
         description: 'Base URL of Feedback Hub API'
         type: string
@@ -268,12 +275,36 @@ jobs:
             | cosign login "${{ inputs.gcp-region }}-docker.pkg.dev" \
                 -u oauth2accesstoken --password-stdin
 
+      - name: Resolve expected Cosign signer
+        id: cosign-identity
+        if: inputs.verify-signature == true
+        env:
+          SIGNATURE_MODE: ${{ inputs.signature-mode }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          case "$SIGNATURE_MODE" in
+            caller-workflow)
+              expected_identity="https://github.com/${CALLER_WORKFLOW_REF}"
+              ;;
+            reusable-build-sign)
+              expected_identity="https://github.com/jplannnou/gundo-workflows/.github/workflows/reusable-build-sign.yml@refs/heads/v1"
+              ;;
+            *)
+              echo "::error::Unsupported signature-mode: $SIGNATURE_MODE"
+              exit 1
+              ;;
+          esac
+          echo "identity=$expected_identity" >> "$GITHUB_OUTPUT"
+
       - name: Verify image signature (Cosign)
         if: inputs.verify-signature == true
         run: |
           COSIGN_EXPERIMENTAL=1 cosign verify \
-            --certificate-identity-regexp="https://github.com/${{ github.repository_owner }}/.*" \
+            --certificate-identity="${{ steps.cosign-identity.outputs.identity }}" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            --certificate-github-workflow-repository="${{ github.repository }}" \
+            --certificate-github-workflow-ref="${{ github.ref }}" \
             "${{ inputs.image }}"
 
       - name: Report deploy started
