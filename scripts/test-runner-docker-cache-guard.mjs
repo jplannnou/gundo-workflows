@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -110,7 +111,7 @@ test("installer discovers both unit families, stages by default, and rejects for
     const dry = await run("bash", [installer, "--dry-run"], { env: installerEnv(f) }); assert.equal(dry.code, 0); assert.match(dry.output, /listeners=2/); assert.match(dry.output, /personal-actions-runner@two/);
     const staged = await run("bash", [installer, "--apply"], { env: installerEnv(f) }); assert.equal(staged.code, 0); assert.match(staged.output, /RUNNER_GUARD_PENDING external-quiescence-token-required/); assert.doesNotMatch(await trace(f), /\ndocker |\n(?:stop|start) /);
     const policy = await readFile(join(f.root, canonicalTmpfiles), "utf8"); assert.equal(policy, `f ${canonicalLock} 0644 root root -\n`);
-    const dropin = await readFile(join(f.systemd, `${units[0]}.d`, "90-gundo-docker-cache-admission.conf"), "utf8"); assert.match(dropin, /ExecStartPre=\/usr\/bin\/systemd-tmpfiles --create \/etc\/tmpfiles\.d\/gundo-runner-docker-cache-admission\.conf/);
+    const dropin = await readFile(join(f.systemd, `${units[0]}.d`, "90-gundo-docker-cache-admission.conf"), "utf8"); assert.match(dropin, /ExecStartPre=\+\/usr\/bin\/systemd-tmpfiles --create \/etc\/tmpfiles\.d\/gundo-runner-docker-cache-admission\.conf/);
     const foreign = join(f.root, "foreign-systemctl"); await writeFile(foreign, `#!/usr/bin/env bash\nif [[ "$1" == list-units ]]; then printf 'actions-runner@one.service loaded active running\\npersonal-actions-runner@two.service loaded active running\\n'; elif [[ "$1" == show ]]; then printf 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/foreign\\n'; fi\n`, { mode: 0o755 });
     const rejected = await run("bash", [installer, "--dry-run"], { env: { ...installerEnv(f), GUNDO_SYSTEMCTL: foreign } }); assert.notEqual(rejected.code, 0); assert.match(rejected.output, /foreign-job-started-hook/);
     const customPath = join(custom.root, "not-a-lock");
@@ -134,6 +135,27 @@ test("tmpfiles restores the admission lock after an ephemeral reset and preserve
     const existingRun = await run("bash", [installer, "--apply"], { env: installerEnv(existing) }); assert.equal(existingRun.code, 0);
     const after = await stat(existingLock); assert.equal(after.ino, before.ino); assert.equal(await readFile(existingLock, "utf8"), "held-lock\n");
   } finally { await dispose(fresh); await dispose(existing); }
+});
+
+test("a non-root systemd service bootstraps the root-owned lock before its listener command", {
+  skip: process.getuid?.() !== 0 || !existsSync("/run/systemd/system") || !existsSync("/usr/bin/systemd-run"),
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "gundo-runner-tmpfiles-unit-"));
+  try {
+    await chmod(root, 0o755);
+    const lock = join(root, canonicalLock);
+    const policy = join(root, "tmpfiles-unit.conf");
+    const unit = `gundo-tmpfiles-contract-${process.pid}-${Date.now()}`;
+    await writeFile(policy, `f ${canonicalLock} 0644 root root -\n`);
+    const started = await run("systemd-run", [
+      "--quiet", "--wait", "--collect", `--unit=${unit}`,
+      "--property=Type=oneshot", "--property=User=nobody", "--property=Group=nogroup",
+      `--property=ExecStartPre=+/usr/bin/systemd-tmpfiles --create --root=${root} ${policy}`,
+      "/usr/bin/test", "-r", lock,
+    ]);
+    assert.equal(started.code, 0, started.output);
+    const created = await stat(lock); assert.equal(created.uid, 0); assert.equal(created.mode & 0o777, 0o644);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("unowned listener and incomplete 22-listener coverage are refused before staging", async () => {

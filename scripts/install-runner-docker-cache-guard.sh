@@ -131,7 +131,10 @@ rm -f "$state_dir/ready"
 for unit in "${listeners[@]}"; do
   dropin="$systemd_dir/$unit.d/90-gundo-docker-cache-admission.conf"
   install -d -m 0755 "$(dirname "$dropin")"
-  printf '[Service]\nExecStartPre=/usr/bin/systemd-tmpfiles --create %s\nEnvironment=ACTIONS_RUNNER_HOOK_JOB_STARTED=%s\n' "$canonical_tmpfiles_conf" "$hook" > "$dropin"
+  # Runner listeners use User=runner. The leading + is intentionally limited
+  # to tmpfiles: it creates the root-owned lock before ExecStart, while the
+  # listener itself and the job-started hook continue as the runner user.
+  printf '[Service]\nExecStartPre=+/usr/bin/systemd-tmpfiles --create %s\nEnvironment=ACTIONS_RUNNER_HOOK_JOB_STARTED=%s\n' "$canonical_tmpfiles_conf" "$hook" > "$dropin"
 done
 "$systemctl_bin" daemon-reload
 
