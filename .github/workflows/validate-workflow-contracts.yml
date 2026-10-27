@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Validate shared workflow invariants
         run: bash scripts/validate-workflow-contracts.sh
+      - name: Cosign security and compatibility floors
+        run: node --test scripts/test-cosign-security-floor.mjs
       - name: Stage-only deployment contract
         run: node --test scripts/test-stage-only-deploy-contract.mjs
       - name: Canary failure reporter contract
