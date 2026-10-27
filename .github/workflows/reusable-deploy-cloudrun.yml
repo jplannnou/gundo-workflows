@@ -244,13 +244,13 @@ jobs:
       #
       # $RUNNER_TEMP siempre pertenece al runner, en las dos clases de máquina.
       #
-      # El SHA-256 de v2.4.1 queda fijado (sacado de `cosign_checksums.txt` y
+      # El SHA-256 de v2.6.5 queda fijado (sacado de `cosign_checksums.txt` y
       # recalculado sobre la descarga): un binario distinto hace fallar el paso
       # en vez de verificar firmas con algo no revisado.
       - name: Install Cosign
         env:
-          COSIGN_VERSION: v2.4.1
-          COSIGN_SHA256: 8b24b946dd5809c6bd93de08033bcf6bc0ed7d336b7785787c080f574b89249b
+          COSIGN_VERSION: v2.6.5
+          COSIGN_SHA256: c3b4f5410e608af03a5eb0aaac84a4313d8da131248e08ff1759ac70c79d1644
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bin"
