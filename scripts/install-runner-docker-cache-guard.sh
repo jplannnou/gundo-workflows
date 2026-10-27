@@ -16,6 +16,7 @@ systemctl_bin=${GUNDO_SYSTEMCTL:-systemctl}
 expected_listeners=${GUNDO_EXPECTED_RUNNER_LISTENERS:-22}
 hook="$prefix/bin/gundo-runner-job-admission.sh"
 hygiene="$prefix/bin/runner-docker-cache-hygiene.sh"
+lock_file=${GUNDO_DOCKER_CACHE_LOCK:-/run/lock/gundo-docker-cache-hygiene.lock}
 
 numeric_dirs() { local path; [[ -d "$proc_root" && -r "$proc_root" ]] || return 2; shopt -s nullglob; for path in "$proc_root"/[0-9]*; do [[ -d "$path" ]] && printf '%s\n' "${path##*/}"; done; }
 proc_comm() { local file="$proc_root/$1/comm"; [[ -e "$file" ]] || return 3; [[ -r "$file" ]] || return 2; cat "$file"; }
@@ -26,24 +27,26 @@ proc_cgroup_unit() {
   unit=${path##*/}; case "$unit" in actions-runner@*.service|personal-actions-runner@*.service) printf '%s\n' "$unit" ;; *) return 2 ;; esac
 }
 units() {
-  local pid comm unit
+  local pid comm comm_status unit unit_status pids
+  pids=$(numeric_dirs) || return 2
   {
     "$systemctl_bin" list-units --all --type=service --no-legend 'actions-runner@*.service' | awk '{print $1}'
     "$systemctl_bin" list-units --all --type=service --no-legend 'personal-actions-runner@*.service' | awk '{print $1}'
     while IFS= read -r pid; do
-      comm=$(proc_comm "$pid"); case $? in 0) ;; 3) continue ;; *) return 2 ;; esac
+      comm_status=0; comm=$(proc_comm "$pid") || comm_status=$?; case "$comm_status" in 0) ;; 3) continue ;; *) return 2 ;; esac
       [[ "$comm" == Runner.Listener ]] || continue
-      unit=$(proc_cgroup_unit "$pid"); case $? in 0) printf '%s\n' "$unit" ;; 3) continue ;; *) return 2 ;; esac
-    done < <(numeric_dirs)
+      unit_status=0; unit=$(proc_cgroup_unit "$pid") || unit_status=$?; case "$unit_status" in 0) printf '%s\n' "$unit" ;; 3) continue ;; *) return 2 ;; esac
+    done <<< "$pids"
   } | LC_ALL=C sort -u
 }
 worker_count() {
-  local pid comm count=0
+  local pid comm comm_status count=0 pids
   [[ -d "$proc_root" && -r "$proc_root" ]] || return 2
+  pids=$(numeric_dirs) || return 2
   while IFS= read -r pid; do
-    comm=$(proc_comm "$pid"); case $? in 0) ;; 3) continue ;; *) return 2 ;; esac
+    comm_status=0; comm=$(proc_comm "$pid") || comm_status=$?; case "$comm_status" in 0) ;; 3) continue ;; *) return 2 ;; esac
     if [[ "$comm" == Runner.Worker ]]; then count=$((count + 1)); fi
-  done < <(numeric_dirs); printf '%s\n' "$count"
+  done <<< "$pids"; printf '%s\n' "$count"
 }
 assert_quiescent() {
   [[ -r "$quiescence_token" ]] || return 1
@@ -56,20 +59,22 @@ foreign_job_started_hook() {
   [[ "$current" == *ACTIONS_RUNNER_HOOK_JOB_STARTED=* && "$current" != *"ACTIONS_RUNNER_HOOK_JOB_STARTED=$hook"* ]]
 }
 listener_has_loaded_hook() {
-  local unit=$1 pid comm mapped env_file found=0
+  local unit=$1 pid comm comm_status mapped mapped_status env_file found=0 pids
+  pids=$(numeric_dirs) || return 2
   while IFS= read -r pid; do
-    comm=$(proc_comm "$pid"); case $? in 0) ;; 3) continue ;; *) return 2 ;; esac
+    comm_status=0; comm=$(proc_comm "$pid") || comm_status=$?; case "$comm_status" in 0) ;; 3) continue ;; *) return 2 ;; esac
     [[ "$comm" == Runner.Listener ]] || continue
-    mapped=$(proc_cgroup_unit "$pid"); case $? in 0) ;; 3) continue ;; *) return 2 ;; esac
+    mapped_status=0; mapped=$(proc_cgroup_unit "$pid") || mapped_status=$?; case "$mapped_status" in 0) ;; 3) continue ;; *) return 2 ;; esac
     [[ "$mapped" == "$unit" ]] || continue
     env_file="$proc_root/$pid/environ"; [[ -e "$env_file" && -r "$env_file" ]] || return 2
-    tr '\0' '\n' < "$env_file" | grep -Fxq "ACTIONS_RUNNER_HOOK_JOB_STARTED=$hook" || return 1
+    tr '\0' '\n' < "$env_file" | grep -Fx "ACTIONS_RUNNER_HOOK_JOB_STARTED=$hook" >/dev/null || return 1
     found=1
-  done < <(numeric_dirs)
+  done <<< "$pids"
   (( found == 1 ))
 }
 
-mapfile -t listeners < <(units)
+unit_listing=$(units) || { echo 'RUNNER_GUARD_REFUSED listener-discovery-unknown' >&2; exit 1; }
+mapfile -t listeners <<< "$unit_listing"
 count=${#listeners[@]}
 if [[ "$count" -ne "$expected_listeners" ]]; then printf 'RUNNER_GUARD_REFUSED listener-count expected=%s actual=%s\n' "$expected_listeners" "$count" >&2; exit 1; fi
 for unit in "${listeners[@]}"; do
@@ -86,6 +91,11 @@ for unit in "${listeners[@]}"; do printf 'RUNNER_GUARD_PLAN dropin=%s/%s.d/90-gu
 printf 'RUNNER_GUARD_PLAN manifest=%s/listeners ready=%s/ready activation=%s\n' "$state_dir" "$state_dir" "${activation:-none}"
 [[ "$mode" == '--apply' ]] || exit 0
 
+# Bootstrap before installing the hook: preserve the inode if the cleaner or a
+# listener already holds it, but make a fresh lock root-owned and world-readable.
+if [[ ! -e "$lock_file" ]]; then install -D -m 0644 /dev/null "$lock_file"; fi
+[[ -f "$lock_file" ]] || { echo 'RUNNER_GUARD_REFUSED lock-invalid' >&2; exit 1; }
+chmod 0644 "$lock_file" || { echo 'RUNNER_GUARD_REFUSED lock-permission-unavailable' >&2; exit 1; }
 install -D -m 0755 "$source_dir/runner-job-admission.sh" "$hook"
 install -D -m 0755 "$source_dir/runner-docker-cache-hygiene.sh" "$hygiene"
 install -d -m 0755 "$state_dir"

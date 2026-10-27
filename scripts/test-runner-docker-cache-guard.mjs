@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,6 +96,27 @@ test("installer discovers both unit families, stages by default, and rejects for
     const staged = await run("bash", [installer, "--apply"], { env: { ...f.env, GUNDO_SYSTEMD_DIR: f.systemd } }); assert.equal(staged.code, 0); assert.match(staged.output, /RUNNER_GUARD_PENDING external-quiescence-token-required/); assert.doesNotMatch(await trace(f), /docker| stop | start /);
     const foreign = join(f.root, "foreign-systemctl"); await writeFile(foreign, `#!/usr/bin/env bash\nif [[ "$1" == list-units ]]; then printf 'actions-runner@one.service loaded active running\\npersonal-actions-runner@two.service loaded active running\\n'; elif [[ "$1" == show ]]; then printf 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/foreign\\n'; fi\n`, { mode: 0o755 });
     const rejected = await run("bash", [installer, "--dry-run"], { env: { ...f.env, GUNDO_SYSTEMCTL: foreign, GUNDO_SYSTEMD_DIR: f.systemd } }); assert.notEqual(rejected.code, 0); assert.match(rejected.output, /foreign-job-started-hook/);
+  } finally { await dispose(f); }
+});
+
+test("stage bootstraps a fresh 0644 lock and preserves an existing inode", async () => {
+  const fresh = await fixture(); const existing = await fixture();
+  try {
+    const freshRun = await run("bash", [installer, "--apply"], { env: { ...fresh.env, GUNDO_SYSTEMD_DIR: fresh.systemd } }); assert.equal(freshRun.code, 0);
+    const created = await stat(fresh.env.GUNDO_DOCKER_CACHE_LOCK); assert.equal(created.mode & 0o777, 0o644);
+    await writeFile(existing.env.GUNDO_DOCKER_CACHE_LOCK, "held-lock\n"); const before = await stat(existing.env.GUNDO_DOCKER_CACHE_LOCK);
+    const existingRun = await run("bash", [installer, "--apply"], { env: { ...existing.env, GUNDO_SYSTEMD_DIR: existing.systemd } }); assert.equal(existingRun.code, 0);
+    const after = await stat(existing.env.GUNDO_DOCKER_CACHE_LOCK); assert.equal(after.ino, before.ino); assert.equal(await readFile(existing.env.GUNDO_DOCKER_CACHE_LOCK, "utf8"), "held-lock\n");
+  } finally { await dispose(fresh); await dispose(existing); }
+});
+
+test("unowned listener and incomplete 22-listener coverage are refused before staging", async () => {
+  const f = await fixture();
+  try {
+    await mkdir(join(f.proc, "999")); await writeFile(join(f.proc, "999", "comm"), "Runner.Listener\n"); await writeFile(join(f.proc, "999", "cgroup"), "0::/system.slice/unknown.service\n");
+    const unknown = await run("bash", [installer, "--dry-run"], { env: { ...f.env, GUNDO_SYSTEMD_DIR: f.systemd } }); assert.notEqual(unknown.code, 0); assert.match(unknown.output, /listener-discovery-unknown/);
+    await rm(join(f.proc, "999"), { recursive: true });
+    const coverage = await run("bash", [installer, "--dry-run"], { env: { ...f.env, GUNDO_SYSTEMD_DIR: f.systemd, GUNDO_EXPECTED_RUNNER_LISTENERS: "22" } }); assert.notEqual(coverage.code, 0); assert.match(coverage.output, /listener-count expected=22 actual=2/);
   } finally { await dispose(f); }
 });
 

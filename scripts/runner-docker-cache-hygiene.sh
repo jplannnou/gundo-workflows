@@ -27,39 +27,42 @@ proc_cgroup_unit() {
   case "$unit" in actions-runner@*.service|personal-actions-runner@*.service) printf '%s\n' "$unit" ;; *) return 2 ;; esac
 }
 discovered_units() {
-  local pid comm unit
+  local pid comm comm_status unit unit_status pids
+  pids=$(numeric_dirs) || return 2
   {
     "$systemctl_bin" list-units --all --type=service --no-legend 'actions-runner@*.service' | awk '{print $1}'
     "$systemctl_bin" list-units --all --type=service --no-legend 'personal-actions-runner@*.service' | awk '{print $1}'
     while IFS= read -r pid; do
-      comm=$(proc_comm "$pid"); case $? in 0) ;; 3) continue ;; *) return 2 ;; esac
+      comm_status=0; comm=$(proc_comm "$pid") || comm_status=$?; case "$comm_status" in 0) ;; 3) continue ;; *) return 2 ;; esac
       [[ "$comm" == Runner.Listener ]] || continue
-      unit=$(proc_cgroup_unit "$pid"); case $? in 0) printf '%s\n' "$unit" ;; 3) continue ;; *) return 2 ;; esac
-    done < <(numeric_dirs)
+      unit_status=0; unit=$(proc_cgroup_unit "$pid") || unit_status=$?; case "$unit_status" in 0) printf '%s\n' "$unit" ;; 3) continue ;; *) return 2 ;; esac
+    done <<< "$pids"
   } | LC_ALL=C sort -u
 }
 worker_state() {
-  local pid comm count=0
+  local pid comm comm_status count=0 pids
   [[ -d "$proc_root" && -r "$proc_root" ]] || return 2
+  pids=$(numeric_dirs) || return 2
   while IFS= read -r pid; do
-    comm=$(proc_comm "$pid"); case $? in 0) ;; 3) continue ;; *) return 2 ;; esac
+    comm_status=0; comm=$(proc_comm "$pid") || comm_status=$?; case "$comm_status" in 0) ;; 3) continue ;; *) return 2 ;; esac
     if [[ "$comm" == Runner.Worker ]]; then count=$((count + 1)); fi
-  done < <(numeric_dirs)
+  done <<< "$pids"
   printf '%s\n' "$count"
 }
 read_manifest() { [[ -s "$1" ]] || return 1; LC_ALL=C sort -u "$1"; }
 has_expected_count() { local count; count=$(grep -cve '^$' <<< "$1"); [[ "$count" =~ ^[0-9]+$ && "$count" -eq "$expected_listeners" ]]; }
 listener_has_loaded_hook() {
-  local unit=$1 pid comm mapped found=0 env_file
+  local unit=$1 pid comm comm_status mapped mapped_status found=0 env_file pids
+  pids=$(numeric_dirs) || return 2
   while IFS= read -r pid; do
-    comm=$(proc_comm "$pid"); case $? in 0) ;; 3) continue ;; *) return 2 ;; esac
+    comm_status=0; comm=$(proc_comm "$pid") || comm_status=$?; case "$comm_status" in 0) ;; 3) continue ;; *) return 2 ;; esac
     [[ "$comm" == Runner.Listener ]] || continue
-    mapped=$(proc_cgroup_unit "$pid"); case $? in 0) ;; 3) continue ;; *) return 2 ;; esac
+    mapped_status=0; mapped=$(proc_cgroup_unit "$pid") || mapped_status=$?; case "$mapped_status" in 0) ;; 3) continue ;; *) return 2 ;; esac
     [[ "$mapped" == "$unit" ]] || continue
     env_file="$proc_root/$pid/environ"; [[ -e "$env_file" && -r "$env_file" ]] || return 2
-    tr '\0' '\n' < "$env_file" | grep -Fxq "ACTIONS_RUNNER_HOOK_JOB_STARTED=$hook_path" || return 1
+    tr '\0' '\n' < "$env_file" | grep -Fx "ACTIONS_RUNNER_HOOK_JOB_STARTED=$hook_path" >/dev/null || return 1
     found=1
-  done < <(numeric_dirs)
+  done <<< "$pids"
   (( found == 1 )) || return 1
 }
 admission_ready() {
