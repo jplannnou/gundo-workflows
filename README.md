@@ -19,6 +19,7 @@ Reusable GitHub Actions workflows and templates for the Gundo platform. One plac
 | `scripts/report-deployment.sh` | POSTs lifecycle events to Feedback Hub DevOps endpoint |
 | `scripts/cleanup-pr-tags.sh` | Removes `pr-<n>` Cloud Run tags when a PR closes |
 | `scripts/sweep-canary-tags.sh` | Sweeps orphan `canary-*` tags left by earlier runs (dry-run by default) |
+| `scripts/install-runner-docker-cache-guard.sh` | Plans or installs the fail-closed Docker cache/runner admission guard |
 | `docs/ONBOARDING.md` | Step-by-step guide for adopting these workflows in a new repo |
 | `docs/ADR/` | Architecture Decision Records |
 
@@ -74,6 +75,16 @@ jobs:
 ```
 
 See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the full setup (WIF provider, IAM bindings, secrets, etc.).
+
+## Docker cache hygiene on self-hosted runners
+
+`scripts/install-runner-docker-cache-guard.sh --dry-run` prints the exact hook,
+systemd drop-in and state files that would be installed. It performs no Docker
+operation. The cleaner remains deferred until every listed runner listener has
+been restarted while idle with `--apply --restart-idle-runners`; that command
+refuses if any `Runner.Worker` exists. The installer never drains queues,
+restarts an active job, changes groups, or deletes containers, volumes or
+worktrees. It also never runs cache cleanup itself.
 
 ## Free security gate for private repositories
 

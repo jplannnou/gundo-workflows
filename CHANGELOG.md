@@ -5,6 +5,11 @@ All notable changes to `gundo-workflows` are documented here.
 ## [Unreleased]
 
 ### Fixed
+- Self-hosted runner Docker cache hygiene now coordinates with GitHub Actions
+  job admission through one `flock`. The cleaner defers without Docker mutation
+  for an active or unknown `Runner.Worker` state, a busy cleaner, or incomplete
+  listener-hook activation. The installer defaults to a non-mutating dry-run;
+  its explicit idle activation refuses to restart runners while jobs exist.
 - `reusable-deploy-cloudrun.yml`: point the Feedback Hub reporter default at the live `gundo-feedback-api` service. The previous `gundo-content-engine` service was retired, so every lifecycle event returned HTTP 404 while deploys continued without DORA telemetry.
 - All reusable workflows now use `google-github-actions/setup-gcloud@v3`, whose action runtime is Node 24. This removes the Node 20 deprecation warning before GitHub disables that runtime.
 - `reusable-deploy-cloudrun.yml`: **barrido de tags `canary-*` huérfanos de runs anteriores**, más `timeout-minutes: 30` en el step de despliegue. Cierra el hueco que dejaban abiertos los tres arreglos previos de limpieza (`5c9cfeed` untag en promote/rollback, `815bacaa` limpieza al cancelar, `e4f545e` tag calculado antes de gcloud): **los tres son AUTOLIMPIEZA** — cada run retira solo su propio `canary-<sha>` — así que ninguno cubre los caminos en los que el job deja de existir sin ejecutar nada, ni siquiera los `always()` (runner self-hosted apagado o reiniciado, job agotado por timeout mientras `gcloud run deploy` está bloqueado esperando al plano de control). Y como ningún run miraba los tags de otros runs, **un solo escape se volvía permanente**. Medido en vivo el 15-ago-2026: 29 tags huérfanos supervivientes — 17 en `genie-ui` (2-7 de mayo, anteriores a toda limpieza), 11 en `genie-api` (10-11 de julio, con revisiones que tardaron entre 3h30m y 9h52m en aprovisionar: `Deploying revision succeeded in 9h52m14.38s`) y 1 en `gundo-ecommerce-ui` (29 de julio). Ahora cada despliegue barre primero lo que quedó colgado, así que un escape se cura en el despliegue siguiente en vez de quedarse para siempre. El barrido nunca hace fallar el deploy (`continue-on-error`) y solo retira tags al 0% de tráfico y con más de 60 minutos de vida, de modo que no puede tocar un canary en vuelo.
