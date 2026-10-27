@@ -13,6 +13,7 @@ docker_bin=${GUNDO_DOCKER:-docker}
 retention_policy=${GUNDO_DOCKER_RETENTION_POLICY:-/usr/local/lib/gundo-storage/docker_cache_retention.py}
 expected_listeners=${GUNDO_EXPECTED_RUNNER_LISTENERS:-22}
 hook_path=${GUNDO_JOB_STARTED_HOOK:-/usr/local/bin/gundo-runner-job-admission.sh}
+fstrim_bin=${GUNDO_FSTRIM:-/usr/sbin/fstrim}
 defer() { printf 'CACHE_DEFERRED reason=%s\n' "$1"; exit 0; }
 
 numeric_dirs() { local path; [[ -d "$proc_root" && -r "$proc_root" ]] || return 2; shopt -s nullglob; for path in "$proc_root"/[0-9]*; do [[ -d "$path" ]] && printf '%s\n' "${path##*/}"; done; }
@@ -87,9 +88,38 @@ workers=$(worker_state) || defer worker-state-unknown
 admission_ready || defer admission-not-ready
 policy=$(timeout 30 python3 -B "$retention_policy") || defer retention-policy-unavailable
 until=$(python3 -c 'import json,sys; value=json.load(sys.stdin).get("until"); print(value if isinstance(value, int) and not isinstance(value, bool) else "")' <<< "$policy") || defer retention-policy-invalid
-[[ "$until" =~ ^[0-9]+$ ]] || defer retention-policy-invalid
-printf 'CACHE_PLAN mode=%s image_prune_until=%s buildx_until=2h\n' "$mode" "$until"
-[[ "$mode" == '--dry-run' ]] && exit 0
-timeout 30 "$docker_bin" version >/dev/null || defer docker-unavailable
-timeout 300 "$docker_bin" image prune --all --force --filter "until=$until"
-timeout 300 "$docker_bin" buildx prune --builder default --all --force --filter until=2h --max-used-space 30GB --reserved-space 15GB
+retention=$(python3 -c 'import json,sys; value=json.load(sys.stdin).get("retention_seconds"); print(value if isinstance(value, int) and not isinstance(value, bool) else "")' <<< "$policy") || defer retention-policy-invalid
+[[ "$until" =~ ^[0-9]+$ && "$retention" =~ ^[0-9]+$ ]] || defer retention-policy-invalid
+docker=("$docker_bin" --host unix:///var/run/docker.sock)
+timeout 30 "${docker[@]}" version >/dev/null || defer docker-unavailable
+help=$(timeout 30 "${docker[@]}" buildx prune --help) || defer buildx-unavailable
+[[ "$help" == *--max-used-space* && "$help" == *--reserved-space* ]] || defer unsupported-buildx
+printf 'CACHE_PLAN mode=%s image_retention_seconds=%s builder=default cache_max=30GB cache_reserve=15GB cache_retention=2h volumes=only-orphan-buildx-state\n' "$mode" "$retention"
+
+# Preserve the existing narrow maintenance scope: only dangling builder-state
+# volumes with the exact BuildKit name and at least one hour old are eligible.
+orphan_builder_volumes() {
+  local apply=$1 cutoff vol created created_s eligible=0 removed=0
+  cutoff=$(( $(date +%s) - 3600 ))
+  while IFS= read -r vol; do
+    [[ "$vol" =~ ^buildx_buildkit_[A-Za-z0-9._-]+_state$ ]] || continue
+    created=$(timeout 30 "${docker[@]}" volume inspect --format '{{.CreatedAt}}' "$vol" 2>/dev/null) || continue
+    created_s=$(date -d "$created" +%s 2>/dev/null) || continue
+    (( created_s <= cutoff )) || continue
+    ((eligible += 1))
+    if (( apply )) && timeout 60 "${docker[@]}" volume rm "$vol" >/dev/null 2>&1; then ((removed += 1)); fi
+  done < <(timeout 60 "${docker[@]}" volume ls --filter dangling=true --format '{{.Name}}')
+  printf 'ORPHAN_BUILDER_VOLUMES eligible=%s removed=%s apply=%s\n' "$eligible" "$removed" "$apply"
+}
+
+if [[ "$mode" == '--dry-run' ]]; then orphan_builder_volumes 0; exit 0; fi
+before=$(df -B1 --output=used / | tail -n 1 | tr -d ' ') || defer disk-usage-unavailable
+[[ "$before" =~ ^[0-9]+$ ]] || defer disk-usage-invalid
+timeout 300 "${docker[@]}" image prune --all --force --filter "until=$until"
+timeout 300 "${docker[@]}" buildx prune --builder default --all --force --filter until=2h --max-used-space 30GB --reserved-space 15GB
+orphan_builder_volumes 1
+sync
+timeout 60 "$fstrim_bin" / >/dev/null || defer fstrim-unavailable
+after=$(df -B1 --output=used / | tail -n 1 | tr -d ' ') || defer disk-usage-unavailable
+[[ "$after" =~ ^[0-9]+$ ]] || defer disk-usage-invalid
+printf 'CACHE_DONE used_before=%s used_after=%s net_reclaimed=%s windows_compaction=separate\n' "$before" "$after" "$((before - after))"

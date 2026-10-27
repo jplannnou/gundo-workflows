@@ -43,10 +43,14 @@ if [[ "$1" == list-units ]]; then printf 'actions-runner@one.service loaded acti
 if [[ "$1" == is-active || "$1" == show || "$1" == daemon-reload || "$1" == stop || "$1" == start ]]; then exit 0; fi
 exit 1
 `;
-  const docker = `#!/usr/bin/env bash\nprintf 'docker %s\\n' "$*" >> "$FIXTURE_TRACE"\n`;
-  const policy = `import json\nprint(json.dumps({"until": 1793040922}))\n`;
-  await Promise.all([writeFile(join(bin, "systemctl"), systemctl, { mode: 0o755 }), writeFile(join(bin, "docker"), docker, { mode: 0o755 }), writeFile(join(bin, "policy.py"), policy, { mode: 0o644 }), writeFile(trace, "")]);
-  const env = { GUNDO_PROC_ROOT: proc, GUNDO_RUNNER_ADMISSION_STATE_DIR: state, GUNDO_DOCKER_CACHE_LOCK: join(root, "guard.lock"), GUNDO_SYSTEMCTL: join(bin, "systemctl"), GUNDO_DOCKER: join(bin, "docker"), GUNDO_DOCKER_RETENTION_POLICY: join(bin, "policy.py"), GUNDO_EXPECTED_RUNNER_LISTENERS: "2", GUNDO_INSTALL_PREFIX: prefix, GUNDO_JOB_STARTED_HOOK: hook, FIXTURE_TRACE: trace };
+  const docker = `#!/usr/bin/env bash
+printf 'docker %s\\n' "$*" >> "$FIXTURE_TRACE"
+if [[ "$*" == *'buildx prune --help'* ]]; then printf '%s\\n' '--max-used-space --reserved-space'; fi
+`;
+  const fstrim = `#!/usr/bin/env bash\nprintf 'fstrim %s\\n' "$*" >> "$FIXTURE_TRACE"\n`;
+  const policy = `import json\nprint(json.dumps({"until": 1793040922, "retention_seconds": 21600}))\n`;
+  await Promise.all([writeFile(join(bin, "systemctl"), systemctl, { mode: 0o755 }), writeFile(join(bin, "docker"), docker, { mode: 0o755 }), writeFile(join(bin, "fstrim"), fstrim, { mode: 0o755 }), writeFile(join(bin, "policy.py"), policy, { mode: 0o644 }), writeFile(trace, "")]);
+  const env = { GUNDO_PROC_ROOT: proc, GUNDO_RUNNER_ADMISSION_STATE_DIR: state, GUNDO_DOCKER_CACHE_LOCK: join(root, "guard.lock"), GUNDO_SYSTEMCTL: join(bin, "systemctl"), GUNDO_DOCKER: join(bin, "docker"), GUNDO_FSTRIM: join(bin, "fstrim"), GUNDO_DOCKER_RETENTION_POLICY: join(bin, "policy.py"), GUNDO_EXPECTED_RUNNER_LISTENERS: "2", GUNDO_INSTALL_PREFIX: prefix, GUNDO_JOB_STARTED_HOOK: hook, FIXTURE_TRACE: trace };
   return { root, bin, proc, state, systemd, trace, prefix, hook, env };
 }
 async function trace(f) { return readFile(f.trace, "utf8"); }
@@ -79,9 +83,9 @@ test("exclusive cleaner blocks admission; root-owned 0644 lock is read by an unp
 test("only a ready 2-listener set with non-executable Python policy may prune", async () => {
   const f = await fixture();
   try {
-    const dry = await run("bash", [hygiene, "--dry-run"], { env: f.env }); assert.equal(dry.code, 0); assert.match(dry.output, /image_prune_until=1793040922/); assert.doesNotMatch(await trace(f), /docker/);
+    const dry = await run("bash", [hygiene, "--dry-run"], { env: f.env }); assert.equal(dry.code, 0); assert.match(dry.output, /image_retention_seconds=21600/); assert.match(dry.output, /ORPHAN_BUILDER_VOLUMES.*apply=0/);
     const apply = await run("bash", [hygiene, "--apply"], { env: f.env }); assert.equal(apply.code, 0);
-    const calls = (await trace(f)).split("\n").filter((v) => v.startsWith("docker ")); assert.equal(calls.length, 3); assert.match(calls[1], /image prune/); assert.match(calls[2], /buildx prune/);
+    const calls = (await trace(f)).split("\n").filter((v) => v.startsWith("docker ")); assert(calls.some((v) => /image prune/.test(v))); assert(calls.some((v) => /buildx prune --builder/.test(v))); assert.match(await trace(f), /fstrim/);
   } finally { await dispose(f); }
 });
 
