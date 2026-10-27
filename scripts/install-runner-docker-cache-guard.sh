@@ -16,7 +16,24 @@ systemctl_bin=${GUNDO_SYSTEMCTL:-systemctl}
 expected_listeners=${GUNDO_EXPECTED_RUNNER_LISTENERS:-22}
 hook="$prefix/bin/gundo-runner-job-admission.sh"
 hygiene="$prefix/bin/runner-docker-cache-hygiene.sh"
-lock_file=${GUNDO_DOCKER_CACHE_LOCK:-/run/lock/gundo-docker-cache-hygiene.lock}
+# The service drop-in and tmpfiles policy deliberately use these fixed paths.
+# Do not make either path configurable: this installer runs as root, and a
+# caller-controlled path here would become a persistent systemd injection.
+canonical_lock_file=/run/lock/gundo-docker-cache-hygiene.lock
+canonical_tmpfiles_conf=/etc/tmpfiles.d/gundo-runner-docker-cache-admission.conf
+tmpfiles_bin=${GUNDO_SYSTEMD_TMPFILES:-/usr/bin/systemd-tmpfiles}
+# Test-only sysroot: it keeps the generated production configuration canonical
+# while allowing the contract suite to exercise the real tmpfiles binary in an
+# isolated filesystem tree. Production leaves it empty.
+tmpfiles_root=${GUNDO_TMPFILES_ROOT:-}
+if [[ -n "$tmpfiles_root" && "$tmpfiles_root" != /* ]]; then
+  echo 'RUNNER_GUARD_REFUSED tmpfiles-root-invalid' >&2; exit 64
+fi
+if [[ -n ${GUNDO_DOCKER_CACHE_LOCK+x} && "${GUNDO_DOCKER_CACHE_LOCK}" != "${tmpfiles_root}${canonical_lock_file}" ]]; then
+  echo 'RUNNER_GUARD_REFUSED custom-lock-path' >&2; exit 64
+fi
+lock_file="${tmpfiles_root}${canonical_lock_file}"
+tmpfiles_conf_host="${tmpfiles_root}${canonical_tmpfiles_conf}"
 
 numeric_dirs() { local path; [[ -d "$proc_root" && -r "$proc_root" ]] || return 2; shopt -s nullglob; for path in "$proc_root"/[0-9]*; do [[ -d "$path" ]] && printf '%s\n' "${path##*/}"; done; }
 proc_comm() { local file="$proc_root/$1/comm"; [[ -e "$file" ]] || return 3; [[ -r "$file" ]] || return 2; cat "$file"; }
@@ -93,7 +110,17 @@ printf 'RUNNER_GUARD_PLAN manifest=%s/listeners ready=%s/ready activation=%s\n' 
 
 # Bootstrap before installing the hook: preserve the inode if the cleaner or a
 # listener already holds it, but make a fresh lock root-owned and world-readable.
-if [[ ! -e "$lock_file" ]]; then install -D -m 0644 /dev/null "$lock_file"; fi
+# Persist that same policy in tmpfiles and in every listener's ExecStartPre so
+# a WSL reboot cannot leave the unprivileged admission hook without its lock.
+install -d -m 0755 "$(dirname "$tmpfiles_conf_host")"
+printf 'f %s 0644 root root -\n' "$canonical_lock_file" > "$tmpfiles_conf_host"
+tmpfiles_args=(--create)
+if [[ -n "$tmpfiles_root" ]]; then
+  tmpfiles_args+=("--root=$tmpfiles_root" "$tmpfiles_conf_host")
+else
+  tmpfiles_args+=("$canonical_tmpfiles_conf")
+fi
+"$tmpfiles_bin" "${tmpfiles_args[@]}" || { echo 'RUNNER_GUARD_REFUSED tmpfiles-create-failed' >&2; exit 1; }
 [[ -f "$lock_file" ]] || { echo 'RUNNER_GUARD_REFUSED lock-invalid' >&2; exit 1; }
 chmod 0644 "$lock_file" || { echo 'RUNNER_GUARD_REFUSED lock-permission-unavailable' >&2; exit 1; }
 install -D -m 0755 "$source_dir/runner-job-admission.sh" "$hook"
@@ -104,7 +131,7 @@ rm -f "$state_dir/ready"
 for unit in "${listeners[@]}"; do
   dropin="$systemd_dir/$unit.d/90-gundo-docker-cache-admission.conf"
   install -d -m 0755 "$(dirname "$dropin")"
-  printf '[Service]\nEnvironment=ACTIONS_RUNNER_HOOK_JOB_STARTED=%s\n' "$hook" > "$dropin"
+  printf '[Service]\nExecStartPre=/usr/bin/systemd-tmpfiles --create %s\nEnvironment=ACTIONS_RUNNER_HOOK_JOB_STARTED=%s\n' "$canonical_tmpfiles_conf" "$hook" > "$dropin"
 done
 "$systemctl_bin" daemon-reload
 
