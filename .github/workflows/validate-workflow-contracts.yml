@@ -30,6 +30,8 @@ jobs:
         run: node --test scripts/test-runner-docker-cache-guard.mjs
       - name: Trivy withdrawn-advisory gate
         run: node --test scripts/test-gate-trivy-report.mjs
+      - name: Node version comes from .nvmrc in every reusable
+        run: node --test scripts/test-node-version-resolution.mjs
       # Cada contrato de descargas se rompe a proposito en una copia y el
       # validador debe rechazarlo con su error: si alguien debilita una regla,
       # este paso se pone rojo.

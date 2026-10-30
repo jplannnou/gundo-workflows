@@ -4,6 +4,9 @@ All notable changes to `gundo-workflows` are documented here.
 
 ## [Unreleased]
 
+### Added
+- `reusable-ci.yml`, `reusable-deploy-firebase.yml`, `reusable-publish-npm.yml`: new input `node-version-file` (default `.nvmrc`, relative to the repo root). When the file exists its first line decides the Node version and wins over `node-version`, so CI runs on the same Node as the repo's runtime instead of the reusable's default. `node-version` (still `'22'`) is the fallback for repos without the file; pass `node-version-file: ''` to force it. An alias such as `lts/*` fails the step instead of reaching setup-node. No current consumer changes version: `gundo-user-engine-api` has `.nvmrc` = 22 and the others have no `.nvmrc` (checked 29-oct-2026). Contract and behaviour covered by `scripts/test-node-version-resolution.mjs`.
+
 ### Fixed
 - Self-hosted runner Docker cache hygiene now coordinates with GitHub Actions
   job admission through one `flock`. The cleaner defers without Docker mutation
