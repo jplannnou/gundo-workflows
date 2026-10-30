@@ -26,6 +26,10 @@ on:
       node-version:
         type: string
         default: '22'
+      node-version-file:
+        description: 'Archivo con la version de Node, relativo a la raiz del repo. Si existe, gana sobre node-version; vacio para no leerlo.'
+        type: string
+        default: '.nvmrc'
       pnpm-version:
         type: string
         default: '10.30.1'
@@ -73,10 +77,38 @@ jobs:
         with:
           version: ${{ inputs.pnpm-version }}
 
+      # Con `.nvmrc` (o el archivo que diga `node-version-file`) el CI corre con
+      # la misma version que el runtime del repo; `node-version` queda de respaldo
+      # para los repos sin archivo. Para forzar `node-version`, pasar
+      # `node-version-file: ''`. Cubierto por scripts/test-node-version-resolution.mjs.
+      - name: Resolve Node version
+        id: node
+        shell: bash
+        env:
+          NODE_VERSION_FILE: ${{ inputs.node-version-file }}
+          NODE_VERSION_INPUT: ${{ inputs.node-version }}
+        run: |
+          set -euo pipefail
+          file="${GITHUB_WORKSPACE}/${NODE_VERSION_FILE}"
+          if [[ -n "$NODE_VERSION_FILE" && -f "$file" ]]; then
+            version="$(head -n 1 "$file" | tr -d '[:space:]')"
+            source="$NODE_VERSION_FILE"
+          else
+            version="$NODE_VERSION_INPUT"
+            source="node-version"
+          fi
+          version="${version#v}"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "::error::Version de Node invalida en ${source}: '${version}'"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Node ${version} (desde ${source})"
+
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ steps.node.outputs.version }}
           cache: 'pnpm'
           registry-url: 'https://npm.pkg.github.com'
           scope: '@jplannnou'

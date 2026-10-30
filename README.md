@@ -46,6 +46,8 @@ jobs:
       workspaces: 'backend,frontend'
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+    # Node sale de `.nvmrc` si existe (input `node-version-file`); si no,
+    # de `node-version`, que por defecto es '22'.
 
   build:
     needs: ci
