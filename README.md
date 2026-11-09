@@ -47,7 +47,7 @@ jobs:
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
     # Node sale de `.nvmrc` si existe (input `node-version-file`); si no,
-    # de `node-version`, que por defecto es '22'.
+    # de `node-version`, que por defecto es '26'.
 
   build:
     needs: ci

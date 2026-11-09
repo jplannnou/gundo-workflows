@@ -25,7 +25,7 @@ on:
         required: true
       node-version:
         type: string
-        default: '22'
+        default: '26'
       node-version-file:
         description: 'Archivo con la version de Node, relativo a la raiz del repo. Si existe, gana sobre node-version; vacio para no leerlo.'
         type: string
