@@ -109,3 +109,21 @@ test('an alias such as lts/* fails instead of reaching setup-node', () => {
   assert.notEqual(r.status, 0);
   assert.equal(r.version, undefined);
 });
+
+// El default de `node-version` es el Node de quien no tiene .nvmrc. Los tres
+// reusables lo comparten y va en el LTS de la flota (26 desde el 09-nov-2026);
+// si uno se queda atras, ese repo prueba en un Node que ya no corre en prod.
+const FLEET_NODE_MAJOR = '26';
+
+test('the three reusables share the fleet node-version default', () => {
+  for (const name of WORKFLOWS) {
+    const m = /\n      node-version:\n(?:        .*\n)*?        default: '([^']*)'/.exec(read(name));
+    assert.ok(m, `${name}: no encuentro el default de node-version`);
+    assert.equal(m[1], FLEET_NODE_MAJOR, `${name}: default de node-version`);
+  }
+});
+
+test('the README documents the same node-version default', () => {
+  const readme = readFileSync(join(root, 'README.md'), 'utf8');
+  assert.match(readme, new RegExp(`por defecto es '${FLEET_NODE_MAJOR}'`));
+});
